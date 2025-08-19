@@ -3,18 +3,14 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'update_util.dart'; // добавьте импорт
 import 'user_list_screen.dart';
 import 'auth_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-
-  // Если не используешь кастомного background handler — убери строку ниже!
-  // FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-
-  // await NotificationService.initialize(); // Удалено!
-
   runApp(const MyApp());
 }
 
@@ -46,17 +42,23 @@ class MyApp extends StatelessWidget {
           foregroundColor: Colors.white,
         ),
       ),
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
-          }
-          if (snap.hasData && snap.data != null) {
-            saveFcmToken();
-            return const UserListScreen();
-          }
-          return const AuthScreen();
+      home: Builder(
+        builder: (ctx) {
+          // Проверяем обновление сразу после запуска
+          checkForUpdateAndInstall(ctx);
+          return StreamBuilder<User?>(
+            stream: FirebaseAuth.instance.authStateChanges(),
+            builder: (context, snap) {
+              if (snap.connectionState == ConnectionState.waiting) {
+                return const Scaffold(body: Center(child: CircularProgressIndicator()));
+              }
+              if (snap.hasData && snap.data != null) {
+                saveFcmToken();
+                return const UserListScreen();
+              }
+              return const AuthScreen();
+            },
+          );
         },
       ),
     );
