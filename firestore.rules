@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+    function isParticipant(chatId) {
+      return chatId in get(/databases/$(database)/documents/chats/$(chatId)).data.keys()
+        || (get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+            .hasAny([request.auth.uid]));
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    match /chats/{chatId} {
+      allow read, update: if isSignedIn() && getAfter().data.participants.hasAny([request.auth.uid]);
+      allow create: if isSignedIn();
+      match /messages/{messageId} {
+        allow read, create: if isSignedIn() && get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]);
+        allow update: if false; // Не даем редактировать отправленные
+      }
+    }
+
+    match /calls/{callId} {
+      allow read, write: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid ||
+        resource.data.calleeId == request.auth.uid ||
+        request.resource.data.callerId == request.auth.uid ||
+        request.resource.data.calleeId == request.auth.uid
+      );
+      match /{document=**} {
+        allow read, write: if isSignedIn();
+      }
+    }
+  }
+}
