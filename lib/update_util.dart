@@ -10,7 +10,7 @@ Future<void> checkForUpdateAndInstall(BuildContext context) async {
   final info = await PackageInfo.fromPlatform();
   final currentVersion = info.version;
   final response = await http.get(Uri.parse(
-    'https://raw.githubusercontent.com/Melvud/antimax/version.json'
+    'https://raw.githubusercontent.com/Melvud/antimax/main/version.json'
   ));
 
   if (response.statusCode == 200) {
