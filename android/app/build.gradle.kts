@@ -11,18 +11,18 @@ android {
     ndkVersion = "27.0.12077973"
 
     compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
-    isCoreLibraryDesugaringEnabled = true
-}
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+    }
 
-kotlinOptions {
-    jvmTarget = "17"
-}
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 
     defaultConfig {
         applicationId = "com.example.messenger_app"
-        minSdk = 23
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -40,5 +40,9 @@ flutter {
 }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:32.8.0"))
+    implementation("com.google.firebase:firebase-messaging")
+    implementation("com.squareup.okhttp3:okhttp:4.10.0")
+    implementation("com.google.firebase:firebase-firestore:24.10.3")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }

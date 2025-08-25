@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'audio_mode_util.dart';
 
 class Signaling {
   final String myId;
@@ -40,11 +41,7 @@ class Signaling {
   Future<void> initRenderers(RTCVideoRenderer localRenderer) async {
     final mediaConstraints = {
       'audio': {
-    'echoCancellation': true,
-    'autoGainControl': true,
-    'noiseSuppression': true,
-    'googAutoGainControl': true, // для WebRTC
-  },
+      },
       'video': callType == 'video'
           ? {
               'facingMode': 'user',
@@ -56,6 +53,8 @@ class Signaling {
     };
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     localRenderer.srcObject = _localStream;
+
+    await AudioModeUtil.setInCallMode(true); // <--- Включаем режим звонка ОС Android
     await _setSpeakerphoneOn(callType == 'video');
   }
 
@@ -76,12 +75,14 @@ class Signaling {
           'sdp': offer.sdp,
           'callerStatus': 'calling',
           'calleeStatus': 'accepted',
+          'callType': callType,
         }, SetOptions(merge: true));
         _callAccepted = true;
-      } else if (data['type'] == 'answer' && data['callerStatus'] == 'accepted' && _pc?.signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+      } else if (data['type'] == 'answer' &&
+          data['callerStatus'] == 'accepted' &&
+          _pc?.signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
         await _pc!.setRemoteDescription(RTCSessionDescription(data['sdp'], 'answer'));
         _remoteDescriptionSet = true;
-        // Apply pending candidates
         for (var c in _pendingCandidates) {
           await _pc!.addCandidate(c);
         }
@@ -100,7 +101,6 @@ class Signaling {
       if (data['type'] == 'offer' && data['calleeStatus'] == 'accepted' && !_callAccepted) {
         await _pc!.setRemoteDescription(RTCSessionDescription(data['sdp'], 'offer'));
         _remoteDescriptionSet = true;
-        // Apply pending candidates
         for (var c in _pendingCandidates) {
           await _pc!.addCandidate(c);
         }
@@ -112,6 +112,7 @@ class Signaling {
           'sdp': answer.sdp,
           'callerStatus': 'accepted',
           'calleeStatus': 'accepted',
+          'callType': callType,
         }, SetOptions(merge: true));
         _callAccepted = true;
       }
@@ -125,7 +126,11 @@ class Signaling {
         {
           'urls': [
             'turn:51.250.39.40:3478?transport=udp',
-            'turn:51.250.39.40:3478?transport=tcp'
+            'turn:51.250.39.40:3478?transport=tcp',
+            'turn:51.250.39.40:443?transport=udp',
+            'turn:51.250.39.40:443?transport=tcp',
+            'turn:51.250.39.40:80?transport=udp',
+            'turn:51.250.39.40:80?transport=tcp'
           ],
           'username': 'melvud',
           'credential': 'berkut14'
@@ -142,7 +147,6 @@ class Signaling {
 
     _pc!.onIceCandidate = (candidate) async {
       if (candidate.candidate != null) {
-        // Всегда отправляем кандидата
         await _candidatesRef.add({
           'candidate': candidate.candidate,
           'sdpMid': candidate.sdpMid,
@@ -162,7 +166,6 @@ class Signaling {
     };
   }
 
-  // Слушаем subcollection "candidates"
   void _listenCandidates() {
     _candidatesSub?.cancel();
     _candidatesSub = _candidatesRef
@@ -173,7 +176,7 @@ class Signaling {
         final data = doc.doc.data();
         if (data == null) continue;
         final mData = data as Map<String, dynamic>;
-        if (mData['from'] == myId) continue; // свои не добавляем
+        if (mData['from'] == myId) continue;
         final candidate = RTCIceCandidate(
           mData['candidate'],
           mData['sdpMid'],
@@ -198,13 +201,13 @@ class Signaling {
     await _callSub?.cancel();
     await _candidatesSub?.cancel();
     await _setSpeakerphoneOn(false);
+    await AudioModeUtil.setInCallMode(false); // <--- Возвращаем режим в NORMAL
   }
 
   void dispose() {
     hangUp();
   }
 
-  /// ВКЛ/ВЫКЛ громкий динамик (true — SPEAKER, false — EARPIECE)
   Future<void> setSpeakerphoneOn(bool on) async {
     _speakerOn = on;
     await _setSpeakerphoneOn(on);
@@ -214,5 +217,14 @@ class Signaling {
     try {
       await Helper.setSpeakerphoneOn(on);
     } catch (e) {}
+  }
+
+  Future<void> switchCamera() async {
+    if (_localStream != null) {
+      final videoTracks = _localStream!.getVideoTracks();
+      if (videoTracks.isNotEmpty) {
+        await Helper.switchCamera(videoTracks[0]);
+      }
+    }
   }
 }

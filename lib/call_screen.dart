@@ -35,6 +35,7 @@ class _CallScreenState extends State<CallScreen> {
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   Signaling? signaling;
   StreamSubscription<DocumentSnapshot>? _peerCallSub;
+  StreamSubscription<DocumentSnapshot>? _callTimeSub;
   bool _permissionsGranted = false;
   bool _micOn = true;
   bool _camOn = true;
@@ -43,9 +44,14 @@ class _CallScreenState extends State<CallScreen> {
   bool _connecting = true;
   Timer? _timeoutTimer;
 
-  // Звуки
   final AudioPlayer _ringbackPlayer = AudioPlayer();
   bool _isPlayingRingback = false;
+
+  DateTime? _callStartTime;
+  Timer? _callTimer;
+  Duration _callDuration = Duration.zero;
+
+  bool _isSwapped = false;
 
   @override
   void initState() {
@@ -69,17 +75,17 @@ class _CallScreenState extends State<CallScreen> {
 
   Future<void> _playRingback() async {
     _isPlayingRingback = true;
-    await _ringbackPlayer.setAudioContext(const AudioContext(
+    await _ringbackPlayer.setAudioContext(AudioContext(
       android: AudioContextAndroid(
         isSpeakerphoneOn: true,
         stayAwake: true,
-        contentType: AndroidContentType.music, // <--- важно!
-        usageType: AndroidUsageType.media, // <--- важно!
-        audioFocus: AndroidAudioFocus.gain, // <--- важно!
+        contentType: AndroidContentType.music,
+        usageType: AndroidUsageType.media,
+        audioFocus: AndroidAudioFocus.gain,
       ),
       iOS: AudioContextIOS(
         category: AVAudioSessionCategory.playback,
-        options: [AVAudioSessionOptions.defaultToSpeaker],
+        options: {AVAudioSessionOptions.defaultToSpeaker},
       ),
     ));
     await _ringbackPlayer.setReleaseMode(ReleaseMode.loop);
@@ -94,61 +100,130 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _initCallScreen() async {
-    final mic = await Permission.microphone.request();
-    final cam = widget.callType == "video"
-        ? await Permission.camera.request()
-        : PermissionStatus.granted;
-    if (mic.isGranted && cam.isGranted) {
-      _permissionsGranted = true;
-      _speakerOn = widget.callType == 'video';
-      await _localRenderer.initialize();
-      await _remoteRenderer.initialize();
-      signaling = Signaling(
-        myId: widget.myId,
-        peerId: widget.peerId,
-        docId: widget.docId,
-        isCaller: widget.isCaller,
-        onAddRemoteStream: (stream) {
-          if (mounted) {
-            _stopRingback();
-            setState(() {
-              _remoteRenderer.srcObject = stream;
-              _connecting = false;
-            });
-          }
-        },
-        onRemoveRemoteStream: () {
-          if (mounted) setState(() {
-            _remoteRenderer.srcObject = null;
-          });
-        },
-        callType: widget.callType,
-      );
-      try {
-        await signaling!.initRenderers(_localRenderer);
-        await signaling!.setSpeakerphoneOn(_speakerOn);
+    try {
+      final mic = await Permission.microphone.request();
+      final cam = widget.callType == "video"
+          ? await Permission.camera.request()
+          : PermissionStatus.granted;
+      if (mic.isGranted && cam.isGranted) {
+        _permissionsGranted = true;
+        _speakerOn = widget.callType == 'video';
+        await _localRenderer.initialize();
+        await _remoteRenderer.initialize();
         if (!widget.isCaller) {
-          await Future.delayed(const Duration(milliseconds: 300));
+          final callDoc = await FirebaseFirestore.instance.collection('calls').doc(widget.docId).get();
+          final currentStatus = callDoc.data()?['calleeStatus'];
+          if (currentStatus != 'accepted') {
+            await FirebaseFirestore.instance
+                .collection('calls')
+                .doc(widget.docId)
+                .update({'calleeStatus': 'accepted'});
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
         }
-        if (widget.isCaller) {
-          await signaling!.startCall();
-        } else {
-          await signaling!.waitForCall();
+        signaling = Signaling(
+          myId: widget.myId,
+          peerId: widget.peerId,
+          docId: widget.docId,
+          isCaller: widget.isCaller,
+          onAddRemoteStream: (stream) {
+            if (mounted) {
+              _stopRingback();
+              setState(() {
+                _remoteRenderer.srcObject = stream;
+                _connecting = false;
+              });
+              _onConnected();
+            }
+          },
+          onRemoveRemoteStream: () {
+            if (mounted) setState(() {
+              _remoteRenderer.srcObject = null;
+            });
+          },
+          callType: widget.callType,
+        );
+        try {
+          await signaling!.initRenderers(_localRenderer);
+          await signaling!.setSpeakerphoneOn(_speakerOn);
+          if (!widget.isCaller) {
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
+          if (widget.isCaller) {
+            await signaling!.startCall();
+          } else {
+            await signaling!.waitForCall();
+          }
+          setState(() {});
+        } catch (e, st) {
+          debugPrint('Ошибка инициализации звонка: $e\n$st');
+          if (mounted) {
+            setState(() {
+              _permissionsGranted = false;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Ошибка инициализации звонка: $e')),
+            );
+          }
         }
-        setState(() {});
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _permissionsGranted = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Ошибка инициализации звонка: $e')),
-          );
-        }
+      } else {
+        setState(() => _permissionsGranted = false);
       }
-    } else {
+    } catch (e, st) {
+      debugPrint('Ошибка инициализации call screen: $e\n$st');
       setState(() => _permissionsGranted = false);
     }
+  }
+
+  void _onConnected() async {
+    if (_callStartTime != null) return;
+    if (widget.isCaller) {
+      await FirebaseFirestore.instance
+          .collection('calls')
+          .doc(widget.docId)
+          .update({'callStartTimestamp': FieldValue.serverTimestamp()});
+    }
+    _callTimeSub?.cancel();
+    _callTimeSub = FirebaseFirestore.instance
+        .collection('calls')
+        .doc(widget.docId)
+        .snapshots()
+        .listen((doc) {
+      final data = doc.data();
+      if (data != null && data['callStartTimestamp'] != null) {
+        final ts = data['callStartTimestamp'];
+        DateTime tsDate;
+        if (ts is Timestamp) {
+          tsDate = ts.toDate();
+        } else if (ts is DateTime) {
+          tsDate = ts;
+        } else {
+          return;
+        }
+        if (_callStartTime == null) {
+          setState(() {
+            _callStartTime = tsDate;
+          });
+          _startCallTimer();
+        }
+      }
+    });
+  }
+
+  void _startCallTimer() {
+    _callTimer?.cancel();
+    _callTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_callStartTime != null) {
+        setState(() {
+          _callDuration = DateTime.now().difference(_callStartTime!);
+        });
+      }
+    });
+  }
+
+  void _stopCallTimer() {
+    _callTimer?.cancel();
+    _callTimeSub?.cancel();
   }
 
   void _listenPeerCallStatus() {
@@ -187,11 +262,13 @@ class _CallScreenState extends State<CallScreen> {
     _stopRingback();
     _ringbackPlayer.dispose();
     _peerCallSub?.cancel();
+    _callTimeSub?.cancel();
     _localRenderer.srcObject = null;
     _remoteRenderer.srcObject = null;
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     signaling?.dispose();
+    _stopCallTimer();
     super.dispose();
   }
 
@@ -220,6 +297,10 @@ class _CallScreenState extends State<CallScreen> {
   void _toggleSpeaker() async {
     setState(() => _speakerOn = !_speakerOn);
     await signaling?.setSpeakerphoneOn(_speakerOn);
+  }
+
+  void _switchCamera() async {
+    await signaling?.switchCamera();
   }
 
   Future<void> _hangUp() async {
@@ -256,89 +337,45 @@ class _CallScreenState extends State<CallScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF202b3a),
       body: SafeArea(
+        bottom: false,
         child: Stack(
           children: [
-            if (isVideo) ...[
-              Positioned.fill(
-                child: _connecting
-                    ? const Center(child: CircularProgressIndicator())
-                    : RTCVideoView(_remoteRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-              ),
+            if (isVideo)
+              _buildVideoLayout()
+            else
+              _buildAudioLayout(),
+
+            if (_callStartTime != null)
               Positioned(
-                right: 16,
-                top: 16,
-                child: SizedBox(
-                  width: 110,
-                  height: 180,
-                  child: RTCVideoView(_localRenderer, mirror: true),
+                left: 0,
+                right: 0,
+                top: 42,
+                child: Center(
+                  child: Text(
+                    _formatDuration(_callDuration),
+                    style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
-            ] else ...[
-              Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircleAvatar(
-                      radius: 54,
-                      backgroundColor: Colors.blueGrey.shade300,
-                      child: Text(
-                        widget.peerUsername.isNotEmpty ? widget.peerUsername[0].toUpperCase() : '?',
-                        style: const TextStyle(fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      widget.peerUsername,
-                      style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      isVideo ? "Видеозвонок" : "Аудиозвонок",
-                      style: const TextStyle(color: Colors.white70, fontSize: 18),
-                    ),
-                    if (_connecting) ...[
-                      const SizedBox(height: 24),
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 8),
-                      const Text('Устанавливаем соединение...', style: TextStyle(color: Colors.white70)),
-                    ],
-                  ],
-                ),
-              ),
-            ],
+
+            // Кнопки
             Positioned(
               left: 0,
               right: 0,
-              bottom: 36,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _circleIcon(
-                    icon: _micOn ? Icons.mic : Icons.mic_off,
-                    color: Colors.white,
-                    bg: Colors.blue,
-                    onTap: _toggleMic,
-                  ),
-                  if (isVideo)
-                    _circleIcon(
-                      icon: _camOn ? Icons.videocam : Icons.videocam_off,
-                      color: Colors.white,
-                      bg: Colors.blue,
-                      onTap: _toggleCam,
-                    ),
-                  _circleIcon(
-                    icon: _speakerOn ? Icons.volume_up : Icons.hearing,
-                    color: Colors.white,
-                    bg: _speakerOn ? Colors.orange : Colors.blueGrey,
-                    onTap: _toggleSpeaker,
-                  ),
-                  _circleIcon(
-                    icon: Icons.call_end,
-                    color: Colors.white,
-                    bg: Colors.red,
-                    onTap: _hangUp,
-                  ),
-                ],
+              bottom: 0,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).viewInsets.bottom +
+                      MediaQuery.of(context).padding.bottom +
+                      (isVideo ? 32 : 48),
+                  top: isVideo ? 0 : 16,
+                ),
+                child: isVideo
+                    ? _buildVideoCallButtons()
+                    : _buildAudioCallButtons(),
               ),
             ),
           ],
@@ -347,7 +384,165 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Widget _circleIcon({required IconData icon, required Color color, required Color bg, required VoidCallback onTap}) {
+  Widget _buildAudioCallButtons() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _circleIcon(
+          icon: _micOn ? Icons.mic : Icons.mic_off,
+          color: Colors.white,
+          bg: Colors.blue,
+          onTap: _toggleMic,
+        ),
+        _circleIcon(
+          icon: _speakerOn ? Icons.volume_up : Icons.hearing,
+          color: Colors.white,
+          bg: _speakerOn ? Colors.orange : Colors.blueGrey,
+          onTap: _toggleSpeaker,
+        ),
+        _circleIcon(
+          icon: Icons.call_end,
+          color: Colors.white,
+          bg: Colors.red,
+          onTap: _hangUp,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildVideoCallButtons() {
+    // Верхний ряд: микрофон, камера, смена камеры, динамик
+    // Нижний ряд: только call_end по центру
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _circleIcon(
+              icon: _micOn ? Icons.mic : Icons.mic_off,
+              color: Colors.white,
+              bg: Colors.blue,
+              onTap: _toggleMic,
+            ),
+            _circleIcon(
+              icon: _camOn ? Icons.videocam : Icons.videocam_off,
+              color: Colors.white,
+              bg: Colors.blue,
+              onTap: _toggleCam,
+            ),
+            _circleIcon(
+              icon: Icons.cameraswitch,
+              color: Colors.white,
+              bg: Colors.blueGrey,
+              onTap: _switchCamera,
+            ),
+            _circleIcon(
+              icon: _speakerOn ? Icons.volume_up : Icons.hearing,
+              color: Colors.white,
+              bg: _speakerOn ? Colors.orange : Colors.blueGrey,
+              onTap: _toggleSpeaker,
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _circleIcon(
+              icon: Icons.call_end,
+              color: Colors.white,
+              bg: Colors.red,
+              onTap: _hangUp,
+              size: 68,
+              iconSize: 40,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAudioLayout() {
+    final isVideo = widget.callType == "video";
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircleAvatar(
+            radius: 54,
+            backgroundColor: Colors.blueGrey.shade300,
+            child: Text(
+              widget.peerUsername.isNotEmpty ? widget.peerUsername[0].toUpperCase() : '?',
+              style: const TextStyle(fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            widget.peerUsername,
+            style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            isVideo ? "Видеозвонок" : "Аудиозвонок",
+            style: const TextStyle(color: Colors.white70, fontSize: 18),
+          ),
+          if (_connecting) ...[
+            const SizedBox(height: 24),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 8),
+            const Text('Устанавливаем соединение...', style: TextStyle(color: Colors.white70)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVideoLayout() {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: _connecting
+              ? const Center(child: CircularProgressIndicator())
+              : GestureDetector(
+                  onTap: () {},
+                  child: RTCVideoView(
+                    _isSwapped ? _localRenderer : _remoteRenderer,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+        ),
+        Positioned(
+          right: 16,
+          top: 16,
+          child: GestureDetector(
+            onTap: () {
+              setState(() {
+                _isSwapped = !_isSwapped;
+              });
+            },
+            child: SizedBox(
+              width: 110,
+              height: 180,
+              child: RTCVideoView(
+                _isSwapped ? _remoteRenderer : _localRenderer,
+                mirror: true,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _circleIcon({
+    required IconData icon,
+    required Color color,
+    required Color bg,
+    required VoidCallback onTap,
+    double size = 56,
+    double iconSize = 34,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 18),
       child: Ink(
@@ -356,10 +551,21 @@ class _CallScreenState extends State<CallScreen> {
           shape: const CircleBorder(),
         ),
         child: IconButton(
-          icon: Icon(icon, size: 34, color: color),
+          icon: Icon(icon, size: iconSize, color: color),
           onPressed: onTap,
+          iconSize: size,
         ),
       ),
     );
+  }
+
+  String _formatDuration(Duration d) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    final h = d.inHours;
+    final m = d.inMinutes % 60;
+    final s = d.inSeconds % 60;
+    return h > 0
+        ? "${two(h)}:${two(m)}:${two(s)}"
+        : "${two(m)}:${two(s)}";
   }
 }

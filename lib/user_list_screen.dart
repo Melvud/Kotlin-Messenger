@@ -3,8 +3,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'call_screen.dart';
 import 'search_user_screen.dart';
-import 'incoming_call_screen.dart';
 import 'dart:async';
+import 'package:uuid/uuid.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+// Импортируйте ваш app_logger.dart, если его еще нет:
+import 'app_logger.dart';
 
 class UserListScreen extends StatefulWidget {
   const UserListScreen({super.key});
@@ -24,7 +27,7 @@ class _UserListScreenState extends State<UserListScreen> {
     final user = FirebaseAuth.instance.currentUser!;
     myId = user.uid;
     _loadMyUsername();
-    _listenForIncomingCalls();
+    logInfo("[UserListScreen] initState: myId=$myId");
   }
 
   Future<void> _loadMyUsername() async {
@@ -33,75 +36,95 @@ class _UserListScreenState extends State<UserListScreen> {
       setState(() {
         myUsername = doc.data()?['username'] ?? doc.data()?['email'] ?? myId;
       });
-    } catch (_) {
+      logInfo("[UserListScreen] Loaded myUsername: $myUsername");
+    } catch (e, st) {
       setState(() {
         myUsername = myId;
       });
+      logError("[UserListScreen] Exception in loading myUsername: $e\n$st");
     }
-  }
-
-  void _listenForIncomingCalls() {
-    _callSub?.cancel();
-    _callSub = FirebaseFirestore.instance
-        .collection('calls')
-        .doc(myId)
-        .snapshots()
-        .listen((doc) {
-      if (!doc.exists) return;
-      final data = doc.data();
-      if (data == null) return;
-
-      if (data['calleeStatus'] == 'ringing' &&
-          data['from'] != myId &&
-          ModalRoute.of(context)?.settings.name != '/incoming_call') {
-        Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => IncomingCallScreen(
-            myId: myId,
-            myUsername: myUsername ?? '',
-            peerId: data['from'],
-            peerUsername: data['fromUsername'] ?? '',
-            docId: myId,
-            callType: data['callType'] ?? 'audio',
-          ),
-        ));
-      }
-    });
   }
 
   @override
   void dispose() {
     _callSub?.cancel();
+    logInfo("[UserListScreen] dispose called");
     super.dispose();
   }
 
   Future<void> _callUser(String peerId, String peerUsername, String callType) async {
     setState(() => _loading = true);
+    logInfo("[UserListScreen] Start _callUser: peerId=$peerId, peerUsername=$peerUsername, callType=$callType, myId=$myId, myUsername=$myUsername");
     try {
-      final peerDoc = await FirebaseFirestore.instance.collection('users').doc(peerId).get();
-      final peerToken = peerDoc.data()?['fcmToken'];
-      if (peerToken != null) {
-        final calls = FirebaseFirestore.instance.collection('calls');
-        await calls.doc(peerId).set({
-          'type': 'call',
-          'from': myId,
-          'fromUsername': myUsername,
-          'callType': callType,
-          'calleeStatus': 'ringing',
-          'timestamp': FieldValue.serverTimestamp(),
-        });
+      if (peerId == myId) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Вы не можете звонить самому себе.')),
+          );
+        }
+        logError("[UserListScreen] Attempted to call self, abort.");
+        return;
       }
+
+      final peerDoc = await FirebaseFirestore.instance.collection('users').doc(peerId).get();
+      logDebug("[UserListScreen] peerDoc data: ${peerDoc.data()}");
+      final peerTokens = peerDoc.data()?['fcmTokens'];
+      logInfo("[UserListScreen] peerTokens: $peerTokens");
+
+      if (peerTokens == null || !(peerTokens is List) || peerTokens.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Пользователь еще не может принимать звонки (нет FCM токена).')),
+          );
+        }
+        logError("[UserListScreen] No FCM tokens for peer: $peerId");
+        return;
+      }
+
+      final callId = const Uuid().v4();
+
+      final calls = FirebaseFirestore.instance.collection('calls');
+      await calls.doc(callId).set({
+        'type': 'call',
+        'from': myId,
+        'fromUsername': myUsername,
+        'to': peerId,
+        'toUsername': peerUsername,
+        'callType': callType,
+        'calleeStatus': 'ringing',
+        'callerStatus': 'calling',
+        'timestamp': FieldValue.serverTimestamp(),
+        'calleeFcmTokens': peerTokens,
+      });
+      logInfo("[UserListScreen] Created call doc with callId=$callId");
+
+      final params = {
+        'toUserId': peerId,
+        'fromUsername': myUsername ?? '',
+        'callId': callId,
+        'callType': callType,
+      };
+      logDebug("[UserListScreen] Calling sendCallNotification with: $params");
+
+      final result = await FirebaseFunctions.instance
+          .httpsCallable('sendCallNotification')
+          .call(params);
+
+      logInfo("[UserListScreen] sendCallNotification result: $result");
+
       Navigator.push(context, MaterialPageRoute(
         builder: (_) => CallScreen(
           isCaller: true,
           peerId: peerId,
           peerUsername: peerUsername,
           myId: myId,
-          myUsername: myUsername!,
-          docId: peerId,
+          myUsername: myUsername ?? '',
+          docId: callId,
           callType: callType,
         ),
       ));
-    } catch (e) {
+    } catch (e, stack) {
+      logError("[UserListScreen] Exception in _callUser: $e\n$stack");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Ошибка вызова: $e')),
@@ -120,7 +143,9 @@ class _UserListScreenState extends State<UserListScreen> {
           .collection('contacts')
           .doc(contactId)
           .delete();
-    } catch (e) {
+      logInfo("[UserListScreen] Deleted contact: $contactId");
+    } catch (e, st) {
+      logError("[UserListScreen] Exception in _deleteContact: $e\n$st");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Ошибка удаления: $e')),
@@ -145,8 +170,9 @@ class _UserListScreenState extends State<UserListScreen> {
         'username': result['username'] ?? '',
         'email': result['email'] ?? '',
       });
+      logInfo("[UserListScreen] Added contact: $contactId");
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Контакт добавлен')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Контакт добавлен')));
       }
     }
   }
@@ -189,6 +215,7 @@ class _UserListScreenState extends State<UserListScreen> {
               );
               if (confirm == true) {
                 await FirebaseAuth.instance.signOut();
+                logInfo("[UserListScreen] Signed out");
               }
             },
           ),
