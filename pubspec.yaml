@@ -1,7 +1,7 @@
 name: antimax
 description: Messenger app with audio & video calls
 publish_to: "none"
-version: 1.1.0
+version: 1.2.0
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -34,5 +34,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/sounds/ringback.mp3
-    - assets/sounds/ringing.mp3
+    - assets/audio/ringback.mp3
+    - assets/audio/ringing.mp3

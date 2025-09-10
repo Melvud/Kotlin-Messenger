@@ -22,7 +22,10 @@
         android:requestLegacyExternalStorage="true"
         android:theme="@style/LaunchTheme">
 
-        
+        <service
+        android:name=".CallForegroundService"
+        android:exported="false"
+        android:foregroundServiceType="microphone|camera|dataSync" />
         <!-- Service для FCM -->
         <service
             android:name=".MyFirebaseMessagingService"

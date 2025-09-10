@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'user_list_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -10,55 +12,92 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  final _emailController = TextEditingController();
-  final _passController = TextEditingController();
-  final _nameController = TextEditingController();
-  bool _isLogin = true;
-  String? _error;
-  bool _loading = false;
+  final _formKey = GlobalKey<FormState>();
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  final _usernameCtrl = TextEditingController();
 
-  Future<void> _auth() async {
+  final _focusPass = FocusNode();
+  final _focusUsername = FocusNode();
+
+  bool _isRegister = false;
+  bool _obscure = true;
+  bool _loading = false;
+  String? _errorInline;
+
+  String? _emailValidator(String? v) {
+    final value = (v ?? '').trim();
+    final emailRegex = RegExp(r"^[\w\.\-]+@[\w\.\-]+\.\w+$");
+    if (value.isEmpty) return 'Email обязателен';
+    if (!emailRegex.hasMatch(value)) return 'Некорректный email';
+    return null;
+  }
+
+  String? _passwordValidator(String? v) {
+    final value = (v ?? '').trim();
+    if (value.length < 6) return 'Минимум 6 символов';
+    return null;
+  }
+
+  String? _usernameValidator(String? v) {
+    if (!_isRegister) return null;
+    final value = (v ?? '').trim();
+    final rgx = RegExp(r'^[a-zA-Z0-9_]{3,24}$');
+    if (!rgx.hasMatch(value)) return '3–24 символа: латиница/цифры/_';
+    return null;
+  }
+
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _passCtrl.dispose();
+    _usernameCtrl.dispose();
+    _focusPass.dispose();
+    _focusUsername.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      HapticFeedback.heavyImpact();
+      return;
+    }
     setState(() {
-      _error = null;
       _loading = true;
+      _errorInline = null;
     });
+
     try {
-      if (_emailController.text.trim().isEmpty ||
-          _passController.text.trim().isEmpty ||
-          (!_isLogin && _nameController.text.trim().isEmpty)) {
-        setState(() {
-          _error = 'Заполните все поля';
-          _loading = false;
-        });
-        return;
-      }
-      if (!_isLogin && _passController.text.trim().length < 6) {
-        setState(() {
-          _error = 'Пароль должен быть не менее 6 символов';
-          _loading = false;
-        });
-        return;
-      }
-      if (_isLogin) {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passController.text.trim(),
-        );
-      } else {
+      if (_isRegister) {
         final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passController.text.trim(),
+          email: _emailCtrl.text.trim(),
+          password: _passCtrl.text,
         );
-        await FirebaseFirestore.instance.collection('users').doc(cred.user!.uid).set({
-          'username': _nameController.text.trim(),
-          'email': _emailController.text.trim(),
-        });
+        final uid = cred.user!.uid;
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({
+          'email': _emailCtrl.text.trim(),
+          'username': _usernameCtrl.text.trim(),
+          'createdAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } else {
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: _emailCtrl.text.trim(),
+          password: _passCtrl.text,
+        );
       }
-      FocusScope.of(context).unfocus(); // скрыть клавиатуру
+
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const UserListScreen()),
+      );
+    } on FirebaseAuthException catch (e) {
+      setState(() => _errorInline = e.message ?? 'Ошибка аутентификации');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_errorInline!)),
+      );
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Неожиданная ошибка: $e')));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -66,53 +105,90 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final title = _isRegister ? 'Регистрация' : 'Войти';
     return Scaffold(
-      appBar: AppBar(title: Text(_isLogin ? 'Вход' : 'Регистрация')),
-      body: Padding(
-        padding: const EdgeInsets.all(32),
+      appBar: AppBar(title: Text(title)),
+      body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (!_isLogin)
-                  TextField(
-                    controller: _nameController,
-                    decoration: const InputDecoration(labelText: 'Имя'),
+            padding: const EdgeInsets.all(20),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 180),
+                    child: Text(
+                      _isRegister ? 'Создайте аккаунт' : 'С возвращением',
+                      key: ValueKey(_isRegister),
+                      style: Theme.of(context).textTheme.headlineMedium,
+                    ),
                   ),
-                TextField(
-                  controller: _emailController,
-                  decoration: const InputDecoration(labelText: 'Почта'),
-                  keyboardType: TextInputType.emailAddress,
-                  autofillHints: const [AutofillHints.email],
-                ),
-                TextField(
-                  controller: _passController,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Пароль'),
-                ),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(_error!, style: const TextStyle(color: Colors.red)),
+                  const SizedBox(height: 16),
+                  if (_errorInline != null) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(_errorInline!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    ),
+                  ],
+                  TextFormField(
+                    controller: _emailCtrl,
+                    decoration: const InputDecoration(labelText: 'Email'),
+                    keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.next,
+                    validator: _emailValidator,
+                    onFieldSubmitted: (_) => _focusPass.requestFocus(),
                   ),
-                const SizedBox(height: 16),
-                _loading
-                    ? const CircularProgressIndicator()
-                    : ElevatedButton(
-                        onPressed: _auth,
-                        child: Text(_isLogin ? 'Войти' : 'Зарегистрироваться'),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _passCtrl,
+                    focusNode: _focusPass,
+                    decoration: InputDecoration(
+                      labelText: 'Пароль',
+                      suffixIcon: IconButton(
+                        tooltip: _obscure ? 'Показать' : 'Скрыть',
+                        onPressed: () => setState(() => _obscure = !_obscure),
+                        icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
                       ),
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _isLogin = !_isLogin;
-                      _error = null;
-                    });
-                  },
-                  child: Text(_isLogin ? 'Нет аккаунта? Зарегистрироваться' : 'Уже есть аккаунт? Войти'),
-                ),
-              ],
+                    ),
+                    obscureText: _obscure,
+                    textInputAction: _isRegister ? TextInputAction.next : TextInputAction.done,
+                    validator: _passwordValidator,
+                    onFieldSubmitted: (_) => _isRegister ? _focusUsername.requestFocus() : _submit(),
+                  ),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 180),
+                    child: _isRegister
+                        ? Padding(
+                            key: const ValueKey('username_field'),
+                            padding: const EdgeInsets.only(top: 12),
+                            child: TextFormField(
+                              controller: _usernameCtrl,
+                              focusNode: _focusUsername,
+                              decoration: const InputDecoration(labelText: 'Имя пользователя'),
+                              textInputAction: TextInputAction.done,
+                              validator: _usernameValidator,
+                              onFieldSubmitted: (_) => _submit(),
+                            ),
+                          )
+                        : const SizedBox.shrink(key: ValueKey('no_username')),
+                  ),
+                  const SizedBox(height: 20),
+                  FilledButton.icon(
+                    onPressed: _loading ? null : _submit,
+                    icon: _loading
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.login),
+                    label: Text(_isRegister ? 'Зарегистрироваться' : 'Войти'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: _loading ? null : () => setState(() => _isRegister = !_isRegister),
+                    child: Text(_isRegister ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Регистрация'),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

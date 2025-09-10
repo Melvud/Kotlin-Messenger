@@ -1,167 +1,182 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'dart:async';
-import 'dart:io';
-import 'package:flutter/services.dart';
-import 'user_list_screen.dart';
+
 import 'auth_screen.dart';
+import 'user_list_screen.dart';
 import 'call_screen.dart';
 import 'update_util.dart';
 import 'app_logger.dart';
+import 'theme/app_theme.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-const MethodChannel callActionsChannel = MethodChannel('com.example.messenger_app/call_actions');
 
-Future<void> requestNotificationPermission() async {
-  if (Platform.isAndroid) {
-    final settings = await FirebaseMessaging.instance.getNotificationSettings();
-    if (settings.authorizationStatus != AuthorizationStatus.authorized) {
-      await FirebaseMessaging.instance.requestPermission(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
-    }
-  }
-}
+/// Канал, через который Android (MainActivity/Service) пробрасывает действия по звонкам:
+/// - method: 'onCallAction'
+/// - args: { 'action': 'accept'|'decline', 'callId': String }
+/// См. MainActivity.kt — configureFlutterEngine/handleIntent. :contentReference[oaicite:4]{index=4}
+const MethodChannel callActionsChannel =
+    MethodChannel('com.example.messenger_app/call_actions');
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  runApp(const MyApp());
+
+  // (Опция) Фоновая обработка FCM (не обязательна для звонков через нотификацию)
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+  runApp(const _RootApp());
 }
 
-class MyApp extends StatefulWidget {
-  const MyApp({super.key});
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  // Инициализация не обязательна, если уже в памяти, но безопасно добавить
+  await Firebase.initializeApp();
+  logInfo('BG FCM: ${message.data}');
+}
+
+class _RootApp extends StatefulWidget {
+  const _RootApp();
+
   @override
-  State<MyApp> createState() => _MyAppState();
+  State<_RootApp> createState() => _RootAppState();
 }
 
-class _MyAppState extends State<MyApp> {
-  StreamSubscription<String>? _fcmTokenSub;
+class _RootAppState extends State<_RootApp> {
+  StreamSubscription<User?>? _authSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
 
   @override
   void initState() {
     super.initState();
 
-    requestNotificationPermission();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      logInfo("main: checkForUpdateAndInstall start");
-      await checkForUpdateAndInstall(navigatorKey.currentContext!);
-      logInfo("main: checkForUpdateAndInstall end");
-    });
-
-    FirebaseAuth.instance.authStateChanges().listen((user) async {
-      if (user != null) {
-        logInfo("authStateChanges: вошёл пользователь ${user.uid}");
-        await addFcmTokenToUser();
-        _listenFcmTokenRefresh();
-      } else {
-        logInfo("authStateChanges: пользователь вышел");
-        _fcmTokenSub?.cancel();
-        await removeFcmTokenFromLastUser();
-      }
-    });
-
-    // Слушаем события из Android
+    // Привязка обработчика MethodChannel от Android.
     callActionsChannel.setMethodCallHandler((call) async {
-      if (call.method == "onCallAction") {
-        final action = call.arguments["action"];
-        final callId = call.arguments["callId"];
-        logInfo("Flutter: onCallAction received: action=$action, callId=$callId");
+      if (call.method == 'onCallAction') {
+        final Map<dynamic, dynamic> args = call.arguments;
+        final String? action = args['action'] as String?;
+        final String? callId = args['callId'] as String?;
+        logInfo('onCallAction <- $args');
 
-        if (action == "accept" && callId != null) {
-          _openCallScreen(callId);
-        } else if (action == "decline") {
-          _handleDecline();
+        if (action == 'accept' && callId != null) {
+          await _openCallScreen(callId, acceptedFromPlatform: true);
+        } else if (action == 'decline' && callId != null) {
+          // Пометим отказ в документе звонка
+          try {
+            await FirebaseFirestore.instance.collection('calls').doc(callId).update({
+              'calleeStatus': 'declined',
+            });
+          } catch (e, st) {
+            logError('Decline update failed: $e\n$st');
+          }
         }
       }
     });
 
-    _checkInitialIntent();
-  }
+    // Реакция на открытие пуша (если Android запустил напрямую Activity — тоже придёт сюда)
+    _onMessageOpenedSub = FirebaseMessaging.onMessageOpenedApp.listen((msg) async {
+      logInfo('onMessageOpenedApp: ${msg.data}');
+      final data = msg.data;
+      if (data['type'] == 'call' && data['callId'] != null) {
+        await _openCallScreen(data['callId'] as String);
+      }
+    });
 
-  void _listenFcmTokenRefresh() {
-    _fcmTokenSub?.cancel();
-    _fcmTokenSub = FirebaseMessaging.instance.onTokenRefresh.listen((token) async {
-      logInfo("FCM onTokenRefresh: $token");
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-          'fcmTokens': FieldValue.arrayUnion([token])
-        }, SetOptions(merge: true));
-        logInfo("Добавлен новый FCM токен в Firestore (onTokenRefresh): $token для user: ${user.uid}");
-      } else {
-        logError("onTokenRefresh: Пользователь не найден!");
+    // Если приложение запускалось по пушу (cold start)
+    _maybeOpenInitialCallFromNotification();
+
+    // Обновление/снятие FCM токена при логине/логауте (опционально, как у вас)
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) async {
+      try {
+        final token = await FirebaseMessaging.instance.getToken();
+        if (user != null && token != null) {
+          await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+            'fcmTokens': FieldValue.arrayUnion([token]),
+          }, SetOptions(merge: true));
+        }
+      } catch (e, st) {
+        logError('FCM token sync failed: $e\n$st');
       }
     });
   }
 
-  Future<void> _checkInitialIntent() async {
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    _onMessageOpenedSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _maybeOpenInitialCallFromNotification() async {
     try {
-      final result = await callActionsChannel.invokeMethod<Map<dynamic, dynamic>?>("getInitialCallAction");
-      logDebug("Flutter: getInitialCallAction result: $result");
-      if (result != null) {
-        final action = result["action"];
-        final callId = result["callId"];
-        if (action == "accept" && callId != null) {
-          _openCallScreen(callId);
-        } else if (action == "decline") {
-          _handleDecline();
-        }
+      final msg = await FirebaseMessaging.instance.getInitialMessage();
+      if (msg == null) return;
+      logInfo('getInitialMessage: ${msg.data}');
+      final data = msg.data;
+      if (data['type'] == 'call' && data['callId'] != null) {
+        await _openCallScreen(data['callId'] as String);
       }
     } catch (e, st) {
-      logError("Flutter: Exception in _checkInitialIntent: $e\n$st");
+      logError('Initial message handling failed: $e\n$st');
     }
   }
 
-  Future<void> _openCallScreen(String callId) async {
+  /// Открытие экрана звонка по callId, считывая Firestore-документ calls/<callId>.
+  /// Совместимо с Android-трамплином (CallTrampolineService → MainActivity → MethodChannel).
+  Future<void> _openCallScreen(String callId, {bool acceptedFromPlatform = false}) async {
     try {
-      logInfo("_openCallScreen: callId=$callId");
-      final callDoc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
-      final data = callDoc.data();
-      if (data != null) {
-        final peerId = data['from'] ?? '';
-        final peerUsername = data['fromUsername'] ?? '';
-        final myId = data['to'] ?? '';
-        final myUsername = '';
-        final callType = data['callType'] ?? 'audio';
+      final doc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
+      if (!doc.exists) {
+        logError('_openCallScreen: call not found $callId');
+        return;
+      }
+      final data = doc.data()!;
+      final String callerId = data['callerId'] as String? ?? '';
+      final String calleeId = data['calleeId'] as String? ?? '';
+      final String callerUsername = data['callerUsername'] as String? ?? 'Caller';
+      final String calleeUsername = data['calleeUsername'] as String? ?? 'Callee';
+      final String callType = data['callType'] as String? ?? 'audio';
+
+      final my = FirebaseAuth.instance.currentUser;
+      if (my == null) {
+        // если нет сессии — предложим логин
         navigatorKey.currentState?.pushAndRemoveUntil(
-          MaterialPageRoute(
-            builder: (_) => CallScreen(
-              isCaller: false,
-              peerId: peerId,
-              peerUsername: peerUsername,
-              myId: myId,
-              myUsername: myUsername,
-              docId: callId,
-              callType: callType,
-            ),
-          ),
-          (route) => false,
+          MaterialPageRoute(builder: (_) => const AuthScreen()),
+          (_) => false,
         );
-        logInfo("_openCallScreen: success push CallScreen");
-      } else {
-        logError("_openCallScreen: call document not found for $callId");
+        return;
       }
-    } catch (e, st) {
-      logError("Flutter: Exception in _openCallScreen: $e\n$st");
-    }
-  }
 
-  void _handleDecline() {
-    logInfo("_handleDecline: call declined");
-    navigatorKey.currentState?.pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const UserListScreen()),
-      (route) => false,
-    );
-    if (navigatorKey.currentContext != null) {
-      ScaffoldMessenger.of(navigatorKey.currentContext!)
-          .showSnackBar(const SnackBar(content: Text("Звонок отклонён")));
+      final bool amCaller = my.uid == callerId;
+      final String peerId = amCaller ? calleeId : callerId;
+      final String peerUsername = amCaller ? calleeUsername : callerUsername;
+      final String myUsername = amCaller ? callerUsername : calleeUsername;
+
+      // Если пришло "accept" с платформы — мы уже callee -> просто открываем звонок.
+      navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: (_) => CallScreen(
+            isCaller: amCaller,
+            peerId: peerId,
+            peerUsername: peerUsername,
+            myId: my.uid,
+            myUsername: myUsername,
+            docId: callId,
+            callType: callType,
+          ),
+        ),
+        (route) => false,
+      );
+
+      logInfo('_openCallScreen -> CallScreen($callId)');
+    } catch (e, st) {
+      logError('_openCallScreen exception: $e\n$st');
     }
   }
 
@@ -169,94 +184,23 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: navigatorKey,
-      title: 'Messenger',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0088cc)),
-        scaffoldBackgroundColor: const Color(0xFFF9F9F9),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF0088cc),
-          foregroundColor: Colors.white,
-        ),
-      ),
+      debugShowCheckedModeBanner: false,
+      title: 'Calls Only',
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: ThemeMode.system,
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snap) {
+        builder: (_, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
-          if (snap.hasData && snap.data != null) {
-            return const UserListScreen();
+          if (snap.data == null) {
+            return const AuthScreen();
           }
-          return const AuthScreen();
+          return const UserListScreen();
         },
       ),
     );
-  }
-}
-
-// === FCM Tokен-менеджмент ===
-
-// Добавляем токен при входе/старте, удаляя его у всех других пользователей
-Future<void> addFcmTokenToUser() async {
-  final user = FirebaseAuth.instance.currentUser;
-  if (user != null) {
-    try {
-      final token = await FirebaseMessaging.instance.getToken();
-      logInfo("addFcmTokenToUser: получен FCM токен: $token");
-      if (token == null) {
-        logError("addFcmTokenToUser: не удалось получить FCM токен");
-        return;
-      }
-
-      final usersRef = FirebaseFirestore.instance.collection('users');
-
-      // Найти всех пользователей, где этот токен уже есть (кроме текущего)
-      final query = await usersRef
-          .where('fcmTokens', arrayContains: token)
-          .get();
-
-      WriteBatch batch = FirebaseFirestore.instance.batch();
-
-      for (final doc in query.docs) {
-        if (doc.id != user.uid) {
-          logDebug("Удаляю FCM токен из другого пользователя: ${doc.id}");
-          batch.update(doc.reference, {
-            'fcmTokens': FieldValue.arrayRemove([token])
-          });
-        }
-      }
-
-      // Добавить токен к текущему пользователю
-      batch.set(
-        usersRef.doc(user.uid),
-        {'fcmTokens': FieldValue.arrayUnion([token])},
-        SetOptions(merge: true),
-      );
-
-      await batch.commit();
-      logInfo("addFcmTokenToUser: Batch commit завершён");
-    } catch (e, st) {
-      logError('Ошибка при добавлении FCM токена: $e\n$st');
-    }
-  }
-}
-
-// При логауте удаляем токен у пользователя, который был залогинен до этого
-Future<void> removeFcmTokenFromLastUser() async {
-  final user = FirebaseAuth.instance.currentUser;
-  if (user != null) {
-    try {
-      final token = await FirebaseMessaging.instance.getToken();
-      logInfo("removeFcmTokenFromLastUser: получен FCM токен: $token");
-      if (token != null) {
-        await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
-          'fcmTokens': FieldValue.arrayRemove([token])
-        });
-        logInfo("removeFcmTokenFromLastUser: токен удалён из Firestore для ${user.uid}");
-      }
-    } catch (e, st) {
-      logError('Ошибка удаления FCM токена: $e\n$st');
-    }
   }
 }

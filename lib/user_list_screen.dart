@@ -1,138 +1,29 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:uuid/uuid.dart';
+
 import 'call_screen.dart';
 import 'search_user_screen.dart';
-import 'dart:async';
-import 'package:uuid/uuid.dart';
-import 'package:cloud_functions/cloud_functions.dart';
-// Импортируйте ваш app_logger.dart, если его еще нет:
-import 'app_logger.dart';
+import 'ui/avatars/user_avatar.dart';
+import 'ui/placeholders/empty_state.dart';
 
 class UserListScreen extends StatefulWidget {
   const UserListScreen({super.key});
+
   @override
   State<UserListScreen> createState() => _UserListScreenState();
 }
 
 class _UserListScreenState extends State<UserListScreen> {
-  late String myId;
-  String? myUsername;
-  StreamSubscription<DocumentSnapshot>? _callSub;
-  bool _loading = false;
+  late final String myId;
 
   @override
   void initState() {
     super.initState();
-    final user = FirebaseAuth.instance.currentUser!;
-    myId = user.uid;
-    _loadMyUsername();
-    logInfo("[UserListScreen] initState: myId=$myId");
-  }
-
-  Future<void> _loadMyUsername() async {
-    try {
-      final doc = await FirebaseFirestore.instance.collection('users').doc(myId).get();
-      setState(() {
-        myUsername = doc.data()?['username'] ?? doc.data()?['email'] ?? myId;
-      });
-      logInfo("[UserListScreen] Loaded myUsername: $myUsername");
-    } catch (e, st) {
-      setState(() {
-        myUsername = myId;
-      });
-      logError("[UserListScreen] Exception in loading myUsername: $e\n$st");
-    }
-  }
-
-  @override
-  void dispose() {
-    _callSub?.cancel();
-    logInfo("[UserListScreen] dispose called");
-    super.dispose();
-  }
-
-  Future<void> _callUser(String peerId, String peerUsername, String callType) async {
-    setState(() => _loading = true);
-    logInfo("[UserListScreen] Start _callUser: peerId=$peerId, peerUsername=$peerUsername, callType=$callType, myId=$myId, myUsername=$myUsername");
-    try {
-      if (peerId == myId) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Вы не можете звонить самому себе.')),
-          );
-        }
-        logError("[UserListScreen] Attempted to call self, abort.");
-        return;
-      }
-
-      final peerDoc = await FirebaseFirestore.instance.collection('users').doc(peerId).get();
-      logDebug("[UserListScreen] peerDoc data: ${peerDoc.data()}");
-      final peerTokens = peerDoc.data()?['fcmTokens'];
-      logInfo("[UserListScreen] peerTokens: $peerTokens");
-
-      if (peerTokens == null || !(peerTokens is List) || peerTokens.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Пользователь еще не может принимать звонки (нет FCM токена).')),
-          );
-        }
-        logError("[UserListScreen] No FCM tokens for peer: $peerId");
-        return;
-      }
-
-      final callId = const Uuid().v4();
-
-      final calls = FirebaseFirestore.instance.collection('calls');
-      await calls.doc(callId).set({
-        'type': 'call',
-        'from': myId,
-        'fromUsername': myUsername,
-        'to': peerId,
-        'toUsername': peerUsername,
-        'callType': callType,
-        'calleeStatus': 'ringing',
-        'callerStatus': 'calling',
-        'timestamp': FieldValue.serverTimestamp(),
-        'calleeFcmTokens': peerTokens,
-      });
-      logInfo("[UserListScreen] Created call doc with callId=$callId");
-
-      final params = {
-        'toUserId': peerId,
-        'fromUsername': myUsername ?? '',
-        'callId': callId,
-        'callType': callType,
-      };
-      logDebug("[UserListScreen] Calling sendCallNotification with: $params");
-
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('sendCallNotification')
-          .call(params);
-
-      logInfo("[UserListScreen] sendCallNotification result: $result");
-
-      Navigator.push(context, MaterialPageRoute(
-        builder: (_) => CallScreen(
-          isCaller: true,
-          peerId: peerId,
-          peerUsername: peerUsername,
-          myId: myId,
-          myUsername: myUsername ?? '',
-          docId: callId,
-          callType: callType,
-        ),
-      ));
-    } catch (e, stack) {
-      logError("[UserListScreen] Exception in _callUser: $e\n$stack");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка вызова: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+    final user = FirebaseAuth.instance.currentUser;
+    myId = user?.uid ?? '';
   }
 
   Future<void> _deleteContact(String contactId) async {
@@ -143,37 +34,63 @@ class _UserListScreenState extends State<UserListScreen> {
           .collection('contacts')
           .doc(contactId)
           .delete();
-      logInfo("[UserListScreen] Deleted contact: $contactId");
-    } catch (e, st) {
-      logError("[UserListScreen] Exception in _deleteContact: $e\n$st");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка удаления: $e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Контакт удалён')));
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка удаления: $e')));
     }
   }
 
-  Future<void> _addContact(BuildContext context) async {
-    final result = await Navigator.push<Map<String, dynamic>?>(
-      context,
-      MaterialPageRoute(builder: (_) => const SearchUserScreen()),
-    );
-    if (result != null && result['uid'] != null) {
-      final contactId = result['uid'] as String;
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(myId)
-          .collection('contacts')
-          .doc(contactId)
-          .set({
-        'username': result['username'] ?? '',
-        'email': result['email'] ?? '',
+  Future<void> _callUser(String peerId, String peerUsername, String callType) async {
+    try {
+      final myDoc = await FirebaseFirestore.instance.collection('users').doc(myId).get();
+      final myUsername = myDoc.data()?['username'] as String? ?? 'Me';
+
+      // Создаём документ звонка
+      final callId = const Uuid().v4();
+      final callRef = FirebaseFirestore.instance.collection('calls').doc(callId);
+      await callRef.set({
+        'callerId': myId,
+        'calleeId': peerId,
+        'callerUsername': myUsername,
+        'calleeUsername': peerUsername,
+        'callType': callType, // 'audio' | 'video'
+        'callerStatus': 'calling',
+        'calleeStatus': 'ringing',
+        'createdAt': FieldValue.serverTimestamp(),
       });
-      logInfo("[UserListScreen] Added contact: $contactId");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Контакт добавлен')));
+
+      // Cloud Function уведомление собеседнику
+      try {
+        final params = {
+          'callId': callId,
+          'callerId': myId,
+          'calleeId': peerId,
+          'callType': callType,
+          'callerUsername': myUsername,
+          'calleeUsername': peerUsername,
+        };
+        await FirebaseFunctions.instance.httpsCallable('sendCallNotification').call(params);
+      } catch (_) {
+        // CF может быть опционален — не блокируем UI
       }
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CallScreen(
+            isCaller: true,
+            peerId: peerId,
+            peerUsername: peerUsername,
+            myId: myId,
+            myUsername: myUsername,
+            docId: callId,
+            callType: callType,
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось начать звонок: $e')));
     }
   }
 
@@ -183,115 +100,112 @@ class _UserListScreenState extends State<UserListScreen> {
         .collection('users')
         .doc(myId)
         .collection('contacts');
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Контакты: ${myUsername ?? "..."}'),
+        title: const Text('Мои контакты'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.person_add),
-            tooltip: 'Добавить контакт',
-            onPressed: () => _addContact(context),
+            tooltip: 'Поиск',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchUserScreen())),
+            icon: const Icon(Icons.search),
           ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Выйти',
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Выйти из аккаунта?'),
-                  content: const Text('Вы действительно хотите выйти?'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('Отмена'),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      child: const Text('Выйти', style: TextStyle(color: Colors.red)),
-                    ),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                await FirebaseAuth.instance.signOut();
-                logInfo("[UserListScreen] Signed out");
-              }
-            },
+          PopupMenuButton<String>(
+            itemBuilder: (ctx) => const [
+              PopupMenuItem(value: 'settings', child: Text('Настройки')),
+            ],
           ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : StreamBuilder<QuerySnapshot>(
-              stream: contactsRef.snapshots(),
-              builder: (_, snap) {
-                if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-                final contacts = snap.data!.docs;
-                if (contacts.isEmpty) {
-                  return const Center(child: Text('Нет добавленных контактов.'));
-                }
-                contacts.sort((a, b) => (a['username'] as String).compareTo(b['username'] as String));
-                return ListView.builder(
-                  itemCount: contacts.length,
-                  itemBuilder: (_, i) {
-                    final u = contacts[i];
-                    final peerId = u.id;
-                    final peerUsername = u['username'];
-                    return ListTile(
-                      leading: CircleAvatar(
-                        child: Text(peerUsername.isNotEmpty ? peerUsername[0].toUpperCase() : "?"),
-                      ),
-                      title: Text(peerUsername),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: "Аудиозвонок",
-                            icon: const Icon(Icons.call),
-                            color: Colors.blue,
-                            onPressed: () => _callUser(peerId, peerUsername, 'audio'),
-                          ),
-                          IconButton(
-                            tooltip: "Видеозвонок",
-                            icon: const Icon(Icons.videocam),
-                            color: Colors.green,
-                            onPressed: () => _callUser(peerId, peerUsername, 'video'),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete),
-                            color: Colors.red,
-                            tooltip: "Удалить контакт",
-                            onPressed: () async {
-                              final confirm = await showDialog<bool>(
-                                context: context,
-                                builder: (ctx) => AlertDialog(
-                                  title: const Text('Удалить контакт?'),
-                                  content: Text('Вы действительно хотите удалить $peerUsername из контактов?'),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(ctx, false),
-                                      child: const Text('Отмена'),
-                                    ),
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(ctx, true),
-                                      child: const Text('Удалить', style: TextStyle(color: Colors.red)),
-                                    ),
-                                  ],
-                                ),
-                              );
-                              if (confirm == true) {
-                                await _deleteContact(peerId);
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchUserScreen())),
+        icon: const Icon(Icons.person_add),
+        label: const Text('Добавить контакт'),
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: contactsRef.snapshots(),
+        builder: (_, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(child: Text('Ошибка загрузки: ${snap.error}'));
+          }
+          final contacts = snap.data?.docs ?? [];
+          if (contacts.isEmpty) {
+            return EmptyState(
+              icon: Icons.contact_page_outlined,
+              title: 'Здесь пока пусто',
+              subtitle: 'Добавьте первый контакт, чтобы начать звонок',
+              action: FilledButton(
+                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchUserScreen())),
+                child: const Text('Добавить контакт'),
+              ),
+            );
+          }
+          contacts.sort((a, b) => (a['username'] as String).compareTo(b['username'] as String));
+          return ListView.separated(
+            itemCount: contacts.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (_, i) {
+              final u = contacts[i];
+              final peerId = u.id;
+              final peerUsername = u['username'] as String? ?? '—';
+              final email = u['email'] as String? ?? '';
+
+              return ListTile(
+                onLongPress: () async {
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Удалить контакт?'),
+                      content: Text('Вы действительно хотите удалить $peerUsername?'),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
+                      ],
+                    ),
+                  );
+                  if (confirm == true) await _deleteContact(peerId);
+                },
+                leading: UserAvatar(displayName: peerUsername, email: email, radius: 20),
+                title: Text(peerUsername),
+                subtitle: email.isNotEmpty ? Text(email) : null,
+                trailing: Wrap(spacing: 6, children: [
+                  IconButton(
+                    tooltip: "Аудиозвонок",
+                    icon: const Icon(Icons.call),
+                    onPressed: () => _callUser(peerId, peerUsername, 'audio'),
+                  ),
+                  IconButton(
+                    tooltip: "Видеозвонок",
+                    icon: const Icon(Icons.videocam),
+                    onPressed: () => _callUser(peerId, peerUsername, 'video'),
+                  ),
+                  IconButton(
+                    tooltip: "Удалить",
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () async {
+                      final confirm = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Удалить контакт?'),
+                          content: Text('Вы действительно хотите удалить $peerUsername?'),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
+                          ],
+                        ),
+                      );
+                      if (confirm == true) await _deleteContact(peerId);
+                    },
+                  ),
+                ]),
+              );
+            },
+          );
+        },
+      ),
     );
   }
 }
