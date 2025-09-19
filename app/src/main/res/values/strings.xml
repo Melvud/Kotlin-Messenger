@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">antimax</string>
+    <!-- Notification channels -->
+    <string name="notif_channel_calls">Calls</string>
+    <string name="notif_channel_calls_desc">Incoming and ongoing calls</string>
+
+    <!-- Titles -->
+    <string name="incoming_video_call_title">Incoming video call</string>
+    <string name="incoming_audio_call_title">Incoming audio call</string>
+
+    <!-- Actions -->
+    <string name="call_accept">Accept</string>
+    <string name="call_decline">Decline</string>
+</resources>
