@@ -14,16 +14,6 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
-/**
- * Репозиторий для работы с чатами.
- *
- * ВАЖНО: в проекте должны быть модели и extension-функции:
- * - data class Chat, Message, MediaUpload и т.п.
- * - fun DocumentSnapshot.toChat(): Chat?
- * - fun DocumentSnapshot.toMessage(): Message?
- *
- * Эти определения находятся в ChatModels.kt и не должны повторяться здесь.
- */
 class ChatRepository(
     private val auth: FirebaseAuth,
     private val db: FirebaseFirestore,
@@ -39,7 +29,7 @@ class ChatRepository(
     suspend fun getOrCreateChat(otherUserId: String): String {
         val myUid = requireUid()
 
-        // Ищем существующий чат между этими двумя пользователями
+        // Ищем существующий чат
         val existingChats = db.collection("chats")
             .whereArrayContains("participants", myUid)
             .get()
@@ -54,7 +44,6 @@ class ChatRepository(
             // Проверяем, не удален ли чат для текущего пользователя
             val deletedFor = existingChat.get("deletedFor") as? List<*> ?: emptyList<Any>()
             if (deletedFor.contains(myUid)) {
-                // Восстанавливаем чат для пользователя
                 db.collection("chats").document(existingChat.id)
                     .update("deletedFor", FieldValue.arrayRemove(myUid))
                     .await()
@@ -114,7 +103,7 @@ class ChatRepository(
 
                 val chats = snapshot?.documents
                     ?.mapNotNull { doc ->
-                        val chat = doc.toChat() // <-- использует extension из ChatModels.kt
+                        val chat = doc.toChat()
                         val deletedFor = doc.get("deletedFor") as? List<*> ?: emptyList<Any>()
                         if (deletedFor.contains(myUid)) null else chat
                     } ?: emptyList()
@@ -129,6 +118,7 @@ class ChatRepository(
      * Получить поток сообщений чата
      */
     fun getMessagesFlow(chatId: String): Flow<List<Message>> = callbackFlow {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) {
             trySend(emptyList())
             close()
@@ -162,6 +152,11 @@ class ChatRepository(
         replyToId: String? = null,
         replyToText: String? = null
     ): String {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank()) {
+            throw IllegalArgumentException("chatId cannot be blank")
+        }
+
         val myUid = requireUid()
         val myProfile = db.collection("users").document(myUid).get().await()
         val myName = myProfile.getString("username") ?: myProfile.getString("name") ?: "User"
@@ -206,6 +201,11 @@ class ChatRepository(
         mediaUpload: MediaUpload,
         caption: String? = null
     ): String {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank()) {
+            throw IllegalArgumentException("chatId cannot be blank")
+        }
+
         val myUid = requireUid()
         val myProfile = db.collection("users").document(myUid).get().await()
         val myName = myProfile.getString("username") ?: myProfile.getString("name") ?: "User"
@@ -261,6 +261,11 @@ class ChatRepository(
      * Отправить стикер
      */
     suspend fun sendSticker(chatId: String, stickerUrl: String): String {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank()) {
+            throw IllegalArgumentException("chatId cannot be blank")
+        }
+
         val myUid = requireUid()
         val myProfile = db.collection("users").document(myUid).get().await()
         val myName = myProfile.getString("username") ?: myProfile.getString("name") ?: "User"
@@ -295,6 +300,9 @@ class ChatRepository(
      * Пометить сообщения как прочитанные
      */
     suspend fun markMessagesAsRead(chatId: String, messageIds: List<String>) {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank() || messageIds.isEmpty()) return
+
         val batch = db.batch()
         messageIds.forEach { messageId ->
             val messageRef = db.collection("chats")
@@ -316,6 +324,9 @@ class ChatRepository(
      * Удалить сообщение
      */
     suspend fun deleteMessage(chatId: String, messageId: String) {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank() || messageId.isBlank()) return
+
         db.collection("chats")
             .document(chatId)
             .collection("messages")
@@ -328,6 +339,9 @@ class ChatRepository(
      * Редактировать сообщение
      */
     suspend fun editMessage(chatId: String, messageId: String, newText: String) {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank() || messageId.isBlank()) return
+
         db.collection("chats")
             .document(chatId)
             .collection("messages")
@@ -345,6 +359,9 @@ class ChatRepository(
      * Установить статус "печатает"
      */
     suspend fun setTyping(chatId: String, isTyping: Boolean) {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank()) return
+
         val myUid = requireUid()
         if (isTyping) {
             db.collection("chats").document(chatId)
@@ -389,6 +406,9 @@ class ChatRepository(
      * Получить информацию о чате
      */
     suspend fun getChat(chatId: String): Chat? {
+        // ИСПРАВЛЕНО: Защита от пустого chatId
+        if (chatId.isBlank()) return null
+
         val doc = db.collection("chats").document(chatId).get().await()
         return doc.toChat()
     }
@@ -397,6 +417,8 @@ class ChatRepository(
      * Удалить чат только для себя (скрыть)
      */
     suspend fun deleteChatForMe(chatId: String) {
+        if (chatId.isBlank()) return
+
         val myUid = requireUid()
         db.collection("chats").document(chatId)
             .update("deletedFor", FieldValue.arrayUnion(myUid))
@@ -410,6 +432,8 @@ class ChatRepository(
      * Удалить чат для всех
      */
     suspend fun deleteChat(chatId: String) {
+        if (chatId.isBlank()) return
+
         val messages = db.collection("chats").document(chatId)
             .collection("messages")
             .get()
@@ -426,6 +450,8 @@ class ChatRepository(
      * Проверить, является ли пользователь создателем чата
      */
     suspend fun isCreator(chatId: String): Boolean {
+        if (chatId.isBlank()) return false
+
         val myUid = requireUid()
         val messages = db.collection("chats")
             .document(chatId)

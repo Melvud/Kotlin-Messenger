@@ -20,12 +20,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.rememberAsyncImagePainter
 import com.example.messenger_app.data.Chat
 import com.example.messenger_app.data.ChatRepository
@@ -41,13 +45,12 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * ГЛАВНЫЙ ЭКРАН МЕССЕНДЖЕРА (КАК В TELEGRAM)
- * Объединяет чаты и поиск контактов в одном месте
- * ДОБАВЛЕНО: Удаление чатов при долгом нажатии
+ * ГЛАВНЫЙ ЭКРАН МЕССЕНДЖЕРА ANTIMAX
+ * Современный дизайн с FAB кнопкой поиска
  */
 @Composable
 fun ChatsListScreen(
-    onChatClick: (String, String, String) -> Unit, // chatId, otherUserId, otherUserName
+    onChatClick: (String?, String, String) -> Unit,
     onLogout: () -> Unit
 ) {
     val auth = remember { FirebaseAuth.getInstance() }
@@ -59,111 +62,83 @@ fun ChatsListScreen(
     val chats by chatRepo.getChatsFlow().collectAsState(initial = emptyList())
     val myUid = auth.currentUser?.uid ?: ""
 
-    var searchQuery by remember { mutableStateOf("") }
-    var isSearchActive by remember { mutableStateOf(false) }
-    var searchResults by remember { mutableStateOf<List<Contact>>(emptyList()) }
     var showMenu by remember { mutableStateOf(false) }
-
-    // НОВОЕ: Состояние для диалога удаления
+    var showSearchDialog by remember { mutableStateOf(false) }
     var chatToDelete by remember { mutableStateOf<Chat?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
-    var searchJob by remember { mutableStateOf<Job?>(null) }
-
-    // Поиск контактов
-    LaunchedEffect(searchQuery) {
-        searchJob?.cancel()
-        if (searchQuery.isBlank()) {
-            searchResults = emptyList()
-            return@LaunchedEffect
-        }
-        searchJob = scope.launch {
-            delay(300) // Debounce
-            contactsRepo.searchUsersByUsernameFlow(searchQuery).collect { users ->
-                // Преобразуем UserProfile в Contact
-                searchResults = users.map { user ->
-                    Contact(
-                        id = user.uid,
-                        username = user.username,
-                        handle = user.handle
-                    )
-                }
-            }
-        }
-    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    if (isSearchActive) {
-                        TextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            placeholder = { Text("Поиск контактов...") },
-                            singleLine = true,
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    } else {
-                        Text(
-                            "Telegram Clone",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
+                    Text(
+                        "Antimax",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp
+                    )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    titleContentColor = Color.White,
+                    actionIconContentColor = Color.White
                 ),
-                navigationIcon = {
-                    if (isSearchActive) {
-                        IconButton(onClick = {
-                            isSearchActive = false
-                            searchQuery = ""
-                            searchResults = emptyList()
-                        }) {
-                            Icon(Icons.Default.ArrowBack, "Назад")
-                        }
-                    }
-                },
                 actions = {
-                    if (!isSearchActive) {
-                        IconButton(onClick = { isSearchActive = true }) {
-                            Icon(Icons.Default.Search, "Поиск")
-                        }
+                    IconButton(onClick = { showSearchDialog = true }) {
+                        Icon(
+                            Icons.Default.Search,
+                            "Поиск",
+                            tint = Color.White
+                        )
                     }
                     Box {
                         IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, "Меню")
+                            Icon(Icons.Default.MoreVert, "Меню", tint = Color.White)
                         }
                         DropdownMenu(
                             expanded = showMenu,
                             onDismissRequest = { showMenu = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text("Выйти") },
+                                text = { Text("Настройки") },
+                                onClick = {
+                                    showMenu = false
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Settings, null)
+                                }
+                            )
+                            Divider()
+                            DropdownMenuItem(
+                                text = { Text("Выйти", color = MaterialTheme.colorScheme.error) },
                                 onClick = {
                                     showMenu = false
                                     onLogout()
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.ExitToApp, null)
+                                    Icon(Icons.Default.ExitToApp, null, tint = MaterialTheme.colorScheme.error)
                                 }
                             )
                         }
                     }
                 }
             )
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = { showSearchDialog = true },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
+                modifier = Modifier.size(64.dp)
+            ) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = "Новый чат",
+                    modifier = Modifier.size(28.dp)
+                )
+            }
         }
     ) { padding ->
         Box(
@@ -171,131 +146,50 @@ fun ChatsListScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Основной контент - либо поиск, либо чаты
-            if (isSearchActive && searchQuery.isNotBlank()) {
-                // Результаты поиска контактов
+            if (chats.isEmpty()) {
+                EmptyChatsView(onNewChat = { showSearchDialog = true })
+            } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    item {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                "Контакты",
-                                modifier = Modifier.padding(16.dp),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    if (searchResults.isEmpty()) {
-                        item {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(32.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.SearchOff,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(48.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                                    )
-                                    Text(
-                                        "Контакты не найдены",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                    )
-                                }
+                    items(chats, key = { it.id }) { chat ->
+                        ChatListItem(
+                            chat = chat,
+                            myUid = myUid,
+                            onClick = {
+                                val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
+                                val otherUserName = chat.participantNames[otherUserId] ?: "User"
+                                onChatClick(chat.id, otherUserId, otherUserName)
+                            },
+                            onLongClick = {
+                                chatToDelete = chat
+                                showDeleteDialog = true
                             }
-                        }
-                    } else {
-                        items(searchResults, key = { it.id }) { contact ->
-                            ContactSearchItem(
-                                contact = contact,
-                                onClick = {
-                                    // Открываем чат с контактом (создастся при отправке первого сообщения)
-                                    isSearchActive = false
-                                    searchQuery = ""
-                                    onChatClick("", contact.id, contact.username)
-                                }
-                            )
-                            Divider(
-                                modifier = Modifier.padding(start = 80.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            )
-                        }
-                    }
-                }
-            } else {
-                // Список чатов
-                if (chats.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Chat,
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                            )
-                            Text(
-                                "Нет чатов",
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            )
-                            Text(
-                                "Начните поиск контактов через кнопку поиска",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                            )
-                        }
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        items(chats, key = { it.id }) { chat ->
-                            ChatListItem(
-                                chat = chat,
-                                myUid = myUid,
-                                onClick = {
-                                    val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
-                                    val otherUserName = chat.participantNames[otherUserId] ?: "User"
-                                    onChatClick(chat.id, otherUserId, otherUserName)
-                                },
-                                onLongClick = {
-                                    // НОВОЕ: Открываем диалог удаления при долгом нажатии
-                                    chatToDelete = chat
-                                    showDeleteDialog = true
-                                }
-                            )
-                            Divider(
-                                modifier = Modifier.padding(start = 80.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            )
-                        }
+                        )
+                        Divider(
+                            modifier = Modifier.padding(start = 80.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        )
                     }
                 }
             }
         }
     }
 
-    // НОВОЕ: Диалог удаления чата
+    // Диалог поиска контактов
+    if (showSearchDialog) {
+        SearchContactsDialog(
+            contactsRepo = contactsRepo,
+            onDismiss = { showSearchDialog = false },
+            onContactSelected = { contact ->
+                showSearchDialog = false
+                // ИСПРАВЛЕНО: Передаем null вместо пустой строки
+                onChatClick(null, contact.id, contact.username)
+            }
+        )
+    }
+
+    // Диалог удаления чата
     if (showDeleteDialog && chatToDelete != null) {
         DeleteChatDialog(
             chat = chatToDelete!!,
@@ -323,6 +217,222 @@ fun ChatsListScreen(
 }
 
 @Composable
+private fun EmptyChatsView(onNewChat: () -> Unit) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                Color.Transparent
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(60.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            }
+
+            Text(
+                "Нет чатов",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Text(
+                "Начните общение, нажав на кнопку\n\"Новый чат\" внизу справа",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+
+            Button(
+                onClick = onNewChat,
+                modifier = Modifier
+                    .padding(top = 16.dp)
+                    .height(56.dp),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Icon(Icons.Default.Add, null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Новый чат", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchContactsDialog(
+    contactsRepo: ContactsRepository,
+    onDismiss: () -> Unit,
+    onContactSelected: (Contact) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<Contact>>(emptyList()) }
+    var searchJob by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(searchQuery) {
+        searchJob?.cancel()
+        if (searchQuery.isBlank()) {
+            searchResults = emptyList()
+            return@LaunchedEffect
+        }
+        searchJob = scope.launch {
+            delay(300)
+            contactsRepo.searchUsersByUsernameFlow(searchQuery).collect { users ->
+                searchResults = users.map { user ->
+                    Contact(
+                        id = user.uid,
+                        username = user.username,
+                        handle = user.handle
+                    )
+                }
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Заголовок
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Новый чат",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, "Закрыть")
+                    }
+                }
+
+                Divider()
+
+                // Поиск
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    placeholder = { Text("Поиск по имени...") },
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Clear, "Очистить")
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                    singleLine = true
+                )
+
+                // Результаты
+                when {
+                    searchQuery.isBlank() -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.PersonSearch,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    "Введите имя для поиска",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                    searchResults.isEmpty() -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.SearchOff,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                                )
+                                Text(
+                                    "Контакты не найдены",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(searchResults, key = { it.id }) { contact ->
+                                ContactSearchItem(
+                                    contact = contact,
+                                    onClick = { onContactSelected(contact) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ContactSearchItem(
     contact: Contact,
     onClick: () -> Unit
@@ -335,33 +445,33 @@ private fun ContactSearchItem(
     ) {
         Row(
             modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Аватар
             Box(
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primary,
+                                MaterialTheme.colorScheme.tertiary
+                            )
+                        )
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = contact.username.firstOrNull()?.uppercase() ?: "?",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+                Text(
+                    text = contact.username.firstOrNull()?.uppercase() ?: "?",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(16.dp))
 
-            // Информация о контакте
             Column(
                 modifier = Modifier.weight(1f)
             ) {
@@ -378,6 +488,13 @@ private fun ContactSearchItem(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
             }
+
+            Icon(
+                Icons.Default.ArrowForwardIos,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+            )
         }
     }
 }
@@ -389,7 +506,6 @@ private fun ChatListItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    // Получаем информацию о собеседнике
     val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
     val otherUserName = chat.participantNames[otherUserId] ?: "User"
     val otherUserPhoto = chat.participantPhotos[otherUserId]
@@ -410,9 +526,8 @@ private fun ChatListItem(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Аватар
             Box(
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(60.dp),
                 contentAlignment = Alignment.Center
             ) {
                 if (otherUserPhoto != null) {
@@ -420,31 +535,39 @@ private fun ChatListItem(
                         painter = rememberAsyncImagePainter(otherUserPhoto),
                         contentDescription = null,
                         modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape),
+                            .size(60.dp)
+                            .clip(CircleShape)
+                            .shadow(2.dp, CircleShape),
                         contentScale = ContentScale.Crop
                     )
                 } else {
                     Box(
                         modifier = Modifier
-                            .size(56.dp)
+                            .size(60.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
+                            .shadow(2.dp, CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(
+                                        MaterialTheme.colorScheme.primary,
+                                        MaterialTheme.colorScheme.tertiary
+                                    )
+                                )
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = otherUserName.firstOrNull()?.uppercase() ?: "?",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            fontWeight = FontWeight.Medium
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(16.dp))
 
-            // Информация о чате
             Column(
                 modifier = Modifier.weight(1f)
             ) {
@@ -456,22 +579,24 @@ private fun ChatListItem(
                     Text(
                         text = otherUserName,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = if (unreadCount > 0) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        fontSize = 17.sp
                     )
 
-                    // Время последнего сообщения
                     chat.lastMessageTime?.let { timestamp ->
                         Text(
                             text = formatTime(timestamp.toDate()),
                             style = MaterialTheme.typography.bodySmall,
+                            fontSize = 13.sp,
                             color = if (unreadCount > 0) {
                                 MaterialTheme.colorScheme.primary
                             } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            }
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            },
+                            fontWeight = if (unreadCount > 0) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                 }
@@ -483,7 +608,6 @@ private fun ChatListItem(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Последнее сообщение или "печатает..."
                     Text(
                         text = when {
                             isTyping -> "печатает..."
@@ -497,6 +621,7 @@ private fun ChatListItem(
                             else -> "Нет сообщений"
                         },
                         style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 15.sp,
                         color = if (isTyping) {
                             MaterialTheme.colorScheme.primary
                         } else if (unreadCount > 0) {
@@ -510,21 +635,20 @@ private fun ChatListItem(
                         modifier = Modifier.weight(1f)
                     )
 
-                    // Счетчик непрочитанных
                     if (unreadCount > 0) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Box(
                             modifier = Modifier
-                                .size(24.dp)
+                                .size(26.dp)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = if (unreadCount > 99) "99+" else unreadCount.toString(),
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                color = Color.White,
                                 style = MaterialTheme.typography.labelSmall,
-                                fontSize = 11.sp,
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -535,9 +659,6 @@ private fun ChatListItem(
     }
 }
 
-/**
- * НОВОЕ: Диалог удаления чата
- */
 @Composable
 private fun DeleteChatDialog(
     chat: Chat,
@@ -555,14 +676,15 @@ private fun DeleteChatDialog(
             Icon(
                 Icons.Default.Delete,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.error
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(32.dp)
             )
         },
         title = {
-            Text("Удалить чат?")
+            Text("Удалить чат?", fontWeight = FontWeight.Bold)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Чат с $otherUserName")
                 Text(
                     "Выберите действие:",
@@ -576,7 +698,6 @@ private fun DeleteChatDialog(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Удалить для всех
                 Button(
                     onClick = onDeleteForEveryone,
                     modifier = Modifier.fillMaxWidth(),
@@ -589,7 +710,6 @@ private fun DeleteChatDialog(
                     Text("Удалить у всех")
                 }
 
-                // Удалить только для меня
                 OutlinedButton(
                     onClick = onDeleteForMe,
                     modifier = Modifier.fillMaxWidth()

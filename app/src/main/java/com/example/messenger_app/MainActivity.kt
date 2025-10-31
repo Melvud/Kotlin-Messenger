@@ -85,7 +85,6 @@ class MainActivity : ComponentActivity() {
                 Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { _ ->
                     NavHost(navController = navController, startDestination = startDest) {
 
-                        // Авторизация
                         composable(Routes.AUTH) {
                             AuthScreen(
                                 onAuthed = {
@@ -101,7 +100,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Список чатов (главный экран)
                         composable(Routes.CHATS_LIST) {
                             ChatsListScreen(
                                 onChatClick = { chatId, otherUserId, otherUserName ->
@@ -116,7 +114,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Экран чата
                         composable(
                             route = Routes.CHAT,
                             arguments = listOf(
@@ -126,7 +123,8 @@ class MainActivity : ComponentActivity() {
                             )
                         ) { entry ->
                             val chatIdRaw = entry.arguments?.getString("chatId") ?: "new"
-                            val chatId = if (chatIdRaw == "new") null else chatIdRaw
+                            // ИСПРАВЛЕНО: Проверяем на "new" И пустую строку
+                            val chatId = if (chatIdRaw == "new" || chatIdRaw.isBlank()) null else chatIdRaw
                             val otherUserId = entry.arguments?.getString("otherUserId") ?: return@composable
                             val otherUserName = entry.arguments?.getString("otherUserName") ?: ""
 
@@ -144,7 +142,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Звонок
                         composable(
                             route = Routes.CALL_ROUTE,
                             arguments = listOf(
@@ -201,7 +198,6 @@ class MainActivity : ComponentActivity() {
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
                     val deepUser = i.getStringExtra("deeplink_username") ?: ""
 
-                    // НОВОЕ: Обработка открытия чата из уведомления о сообщении
                     val openChat = action == "open_chat"
                     val chatIdToOpen = i.getStringExtra("chatId")
                     val otherUserIdToOpen = i.getStringExtra("otherUserId")
@@ -209,7 +205,6 @@ class MainActivity : ComponentActivity() {
 
                     when {
                         openChat && !chatIdToOpen.isNullOrBlank() && !otherUserIdToOpen.isNullOrBlank() -> {
-                            // Открываем чат из уведомления
                             val userName = otherUserNameToOpen ?: "User"
                             navController.navigate(Routes.chatRoute(chatIdToOpen, otherUserIdToOpen, userName)) {
                                 launchSingleTop = true

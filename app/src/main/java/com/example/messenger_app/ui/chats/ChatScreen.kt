@@ -43,7 +43,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * ЭКРАН ЧАТА С СОВРЕМЕННЫМ ДИЗАЙНОМ В СТИЛЕ TELEGRAM
+ * ЭКРАН ЧАТА С СОВРЕМЕННЫМ ДИЗАЙНОМ
+ * ИСПРАВЛЕНО: Правильная обработка null chatId
  */
 @Composable
 fun ChatScreen(
@@ -62,9 +63,16 @@ fun ChatScreen(
     val callsRepo = remember { CallsRepository(auth, db) }
 
     var actualChatId by remember { mutableStateOf(chatId) }
+
+    // ИСПРАВЛЕНО: Используем actualChatId ?: "" чтобы избежать пустого потока
     val messages by chatRepo.getMessagesFlow(actualChatId ?: "").collectAsState(initial = emptyList())
+
     val chat by produceState<Chat?>(initialValue = null, actualChatId) {
-        actualChatId?.let { id -> value = chatRepo.getChat(id) }
+        actualChatId?.let { id ->
+            if (id.isNotBlank()) {
+                value = chatRepo.getChat(id)
+            }
+        }
     }
 
     val myUid = auth.currentUser?.uid ?: ""
@@ -86,7 +94,7 @@ fun ChatScreen(
     }
 
     LaunchedEffect(messages, actualChatId) {
-        if (actualChatId != null) {
+        if (actualChatId != null && actualChatId!!.isNotBlank()) {
             val unreadMessages = messages
                 .filter { it.senderId != myUid && it.status != MessageStatus.READ }
                 .map { it.id }
@@ -99,13 +107,15 @@ fun ChatScreen(
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
     LaunchedEffect(messageText, actualChatId) {
         typingJob?.cancel()
-        if (actualChatId != null && messageText.isNotBlank()) {
+        if (actualChatId != null && actualChatId!!.isNotBlank() && messageText.isNotBlank()) {
             chatRepo.setTyping(actualChatId!!, true)
             typingJob = scope.launch {
                 delay(3000)
-                chatRepo.setTyping(actualChatId!!, false)
+                if (actualChatId != null && actualChatId!!.isNotBlank()) {
+                    chatRepo.setTyping(actualChatId!!, false)
+                }
             }
-        } else if (actualChatId != null) {
+        } else if (actualChatId != null && actualChatId!!.isNotBlank()) {
             chatRepo.setTyping(actualChatId!!, false)
         }
     }
@@ -115,19 +125,23 @@ fun ChatScreen(
     ) { uri: Uri? ->
         uri?.let {
             scope.launch {
-                if (actualChatId == null) {
-                    actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                try {
+                    if (actualChatId == null) {
+                        actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                    }
+                    val fileName = "image_${System.currentTimeMillis()}.jpg"
+                    val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
+                    val upload = MediaUpload(
+                        localUri = uri.toString(),
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        mimeType = "image/jpeg",
+                        type = MessageType.IMAGE
+                    )
+                    chatRepo.sendMediaMessage(context, actualChatId!!, upload)
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                val fileName = "image_${System.currentTimeMillis()}.jpg"
-                val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
-                val upload = MediaUpload(
-                    localUri = uri.toString(),
-                    fileName = fileName,
-                    fileSize = fileSize,
-                    mimeType = "image/jpeg",
-                    type = MessageType.IMAGE
-                )
-                chatRepo.sendMediaMessage(context, actualChatId!!, upload)
             }
         }
     }
@@ -137,19 +151,23 @@ fun ChatScreen(
     ) { uri: Uri? ->
         uri?.let {
             scope.launch {
-                if (actualChatId == null) {
-                    actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                try {
+                    if (actualChatId == null) {
+                        actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                    }
+                    val fileName = "video_${System.currentTimeMillis()}.mp4"
+                    val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
+                    val upload = MediaUpload(
+                        localUri = uri.toString(),
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        mimeType = "video/mp4",
+                        type = MessageType.VIDEO
+                    )
+                    chatRepo.sendMediaMessage(context, actualChatId!!, upload)
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                val fileName = "video_${System.currentTimeMillis()}.mp4"
-                val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
-                val upload = MediaUpload(
-                    localUri = uri.toString(),
-                    fileName = fileName,
-                    fileSize = fileSize,
-                    mimeType = "video/mp4",
-                    type = MessageType.VIDEO
-                )
-                chatRepo.sendMediaMessage(context, actualChatId!!, upload)
             }
         }
     }
@@ -159,19 +177,23 @@ fun ChatScreen(
     ) { uri: Uri? ->
         uri?.let {
             scope.launch {
-                if (actualChatId == null) {
-                    actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                try {
+                    if (actualChatId == null) {
+                        actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                    }
+                    val fileName = "file_${System.currentTimeMillis()}"
+                    val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
+                    val upload = MediaUpload(
+                        localUri = uri.toString(),
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        mimeType = "application/octet-stream",
+                        type = MessageType.FILE
+                    )
+                    chatRepo.sendMediaMessage(context, actualChatId!!, upload)
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                val fileName = "file_${System.currentTimeMillis()}"
-                val fileSize = context.contentResolver.openInputStream(uri)?.available()?.toLong() ?: 0L
-                val upload = MediaUpload(
-                    localUri = uri.toString(),
-                    fileName = fileName,
-                    fileSize = fileSize,
-                    mimeType = "application/octet-stream",
-                    type = MessageType.FILE
-                )
-                chatRepo.sendMediaMessage(context, actualChatId!!, upload)
             }
         }
     }
@@ -257,7 +279,9 @@ fun ChatScreen(
                                 try {
                                     val callInfo = callsRepo.startCall(otherUserId, "video")
                                     onVideoCall(callInfo.id)
-                                } catch (e: Exception) {}
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
                             }
                         }
                     ) {
@@ -269,7 +293,9 @@ fun ChatScreen(
                                 try {
                                     val callInfo = callsRepo.startCall(otherUserId, "audio")
                                     onAudioCall(callInfo.id)
-                                } catch (e: Exception) {}
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
                             }
                         }
                     ) {
@@ -359,9 +385,13 @@ fun ChatScreen(
                         OutlinedTextField(
                             value = messageText,
                             onValueChange = { messageText = it },
-                            modifier = Modifier
-                                .weight(1f),
-                            placeholder = { Text("Сообщение", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) },
+                            modifier = Modifier.weight(1f),
+                            placeholder = {
+                                Text(
+                                    "Сообщение",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                            },
                             shape = RoundedCornerShape(24.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
@@ -390,7 +420,11 @@ fun ChatScreen(
                                             )
                                             messageText = ""
                                             replyToMessage = null
-                                            chatRepo.setTyping(actualChatId!!, false)
+                                            if (actualChatId!!.isNotBlank()) {
+                                                chatRepo.setTyping(actualChatId!!, false)
+                                            }
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
                                         } finally {
                                             isSending = false
                                         }
