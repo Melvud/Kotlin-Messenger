@@ -91,27 +91,41 @@ fun CallScreen(
         NotificationHelper.cancelIncomingCall(context, callId)
     }
 
-    // Foreground сервис
-    LaunchedEffect(callId, isVideo, otherUsername, playRingback) {
-        OngoingCallStore.save(
-            context,
-            callId,
-            if (isVideo) "video" else "audio",
-            otherUsername.orEmpty()
+    // УДАЛЕНО: Дублирующий вызов CallService
+    // LaunchedEffect(callId, isVideo, otherUsername, playRingback) { ... }
+
+    val db = remember { FirebaseFirestore.getInstance() }
+    val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
+    val scope = rememberCoroutineScope()
+
+    // --- ИСПРАВЛЕНИЕ: ИНИЦИАЛИЗАЦИЯ WebRTC ПЕРЕМЕЩЕНА СЮДА ---
+    // Это гарантирует, что `startCall` вызовется *ДО* того,
+    // как `DisposableEffect` (Firestore listener) попытается вызвать `applyRemoteOffer`.
+    LaunchedEffect(callId, isVideo, role) {
+        WebRtcCallManager.init(context)
+
+        // playRingback должен быть true только для вызывающего (caller).
+        val shouldPlayRingback = role == "caller"
+
+        WebRtcCallManager.startCall(
+            callId = callId,
+            isVideo = isVideo,
+            playRingback = shouldPlayRingback,
+            role = role
         )
+
+        // Запускаем foreground сервис.
+        // ИСПРАВЛЕНИЕ: Убран параметр `initializeConnection`
         CallService.start(
             ctx = context,
             callId = callId,
             username = otherUsername.orEmpty(),
             isVideo = isVideo,
             openUi = false,
-            playRingback = playRingback
+            playRingback = shouldPlayRingback
         )
     }
 
-    val db = remember { FirebaseFirestore.getInstance() }
-    val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
-    val scope = rememberCoroutineScope()
 
     // SignalingDelegate
     DisposableEffect(callId, role) {
@@ -181,6 +195,8 @@ fun CallScreen(
     var answerApplied by remember(callId) { mutableStateOf(false) }
 
     // Firestore listeners
+    // Теперь этот Effect будет создан *после* того, как LaunchedEffect выше
+    // вызовет `startCall`, поэтому `peer` в WebRtcCallManager уже будет создан.
     DisposableEffect(callId, role) {
         val callDoc = db.collection("calls").document(callId)
         val docReg: ListenerRegistration = callDoc.addSnapshotListener { snap, _ ->
@@ -292,34 +308,8 @@ fun CallScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // --- ИНИЦИАЛИЗАЦИЯ WebRTC ДОЛЖНА БЫТЬ ПЕРЕД Firestore LISTENERS ---
-// Инициализируем WebRTC и запускаем локальную часть звонка раньше, чтобы
-// incoming offer / answer не пришли раньше, чем WebRTC готов их обработать.
-    LaunchedEffect(callId, isVideo, role) {
-        WebRtcCallManager.init(context)
-
-        // playRingback должен быть true только для вызывающего (caller).
-        val shouldPlayRingback = role == "caller"
-
-        WebRtcCallManager.startCall(
-            callId = callId,
-            isVideo = isVideo,
-            playRingback = shouldPlayRingback,
-            role = role
-        )
-
-        // Запускаем foreground сервис. Для принимающей стороны передаём
-        // initializeConnection = true — сервис может подготовить ресурсы/инициализировать.
-        CallService.start(
-            ctx = context,
-            callId = callId,
-            username = otherUsername.orEmpty(),
-            isVideo = isVideo,
-            openUi = false,
-            playRingback = shouldPlayRingback,
-            initializeConnection = (role == "callee")
-        )
-    }
+    // --- ИНИЦИАЛИЗАЦИЯ WebRTC БЫЛА ПЕРЕМЕЩЕНА ВВЕРХ ---
+    // (блок LaunchedEffect был здесь, теперь он выше)
 
 
     // Cleanup
@@ -434,7 +424,7 @@ fun CallScreen(
 }
 
 // ==================== AUDIO CALL UI ====================
-
+// ... (остальной код UI без изменений) ...
 @Composable
 private fun AudioCallUI(
     peerName: String,

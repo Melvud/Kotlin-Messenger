@@ -11,12 +11,13 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
-import com.example.messenger_app.webrtc.WebRtcCallManager
+// ИМПОРТ WebRtcCallManager БОЛЬШЕ НЕ НУЖЕН
+// import com.example.messenger_app.webrtc.WebRtcCallManager
 import kotlin.math.abs
 
 /**
  * Foreground-сервис звонка: держит уведомление, может проигрывать ringback.
- * УЛУЧШЕНО: Добавлена возможность инициализации соединения при принятии звонка
+ * ИСПРАВЛЕНО: Убрана логика инициализации соединения.
  */
 @Suppress("DEPRECATION")
 class CallService : Service() {
@@ -55,22 +56,15 @@ class CallService : Service() {
                 isVideo = intent?.getBooleanExtra(EXTRA_IS_VIDEO, isVideo) ?: isVideo
                 val openUi = intent?.getBooleanExtra(EXTRA_OPEN_UI, false) ?: false
                 val playRingback = intent?.getBooleanExtra(EXTRA_PLAY_RINGBACK, false) ?: false
-                val initConnection = intent?.getBooleanExtra(EXTRA_INIT_CONNECTION, false) ?: false
+                // УДАЛЕНО: val initConnection = ...
 
                 // Строим и выставляем foreground-уведомление
                 val notif = buildOngoingNotification(this, callId, username, isVideo)
                 startForeground(ongoingNotificationId(callId), notif)
 
-                // ИСПРАВЛЕНИЕ 1: Если нужно инициализировать соединение (при принятии звонка)
-                if (initConnection) {
-                    WebRtcCallManager.init(applicationContext)
-                    WebRtcCallManager.startCall(
-                        callId = callId,
-                        isVideo = isVideo,
-                        playRingback = false,
-                        role = "callee" // принимающий звонок
-                    )
-                }
+                // УДАЛЕНО: Блок if (initConnection) { ... }
+                // WebRtcCallManager.init(applicationContext)
+                // WebRtcCallManager.startCall(...)
 
                 // Открыть UI по требованию
                 if (openUi) {
@@ -162,7 +156,7 @@ class CallService : Service() {
         const val EXTRA_USERNAME = "username"
         const val EXTRA_OPEN_UI = "openUi"
         const val EXTRA_PLAY_RINGBACK = "playRingback"
-        const val EXTRA_INIT_CONNECTION = "initConnection"
+        // УДАЛЕНО: const val EXTRA_INIT_CONNECTION = "initConnection"
 
         fun start(
             ctx: Context,
@@ -170,8 +164,8 @@ class CallService : Service() {
             username: String,
             isVideo: Boolean,
             openUi: Boolean = false,
-            playRingback: Boolean = false,
-            initializeConnection: Boolean = false
+            playRingback: Boolean = false
+            // УДАЛЕНО: initializeConnection: Boolean = false
         ) {
             NotificationHelper.ensureChannels(ctx)
             val i = Intent(ctx, CallService::class.java).apply {
@@ -180,7 +174,7 @@ class CallService : Service() {
                 putExtra(EXTRA_IS_VIDEO, isVideo)
                 putExtra(EXTRA_OPEN_UI, openUi)
                 putExtra(EXTRA_PLAY_RINGBACK, playRingback)
-                putExtra(EXTRA_INIT_CONNECTION, initializeConnection)
+                // УДАЛЕНО: putExtra(EXTRA_INIT_CONNECTION, initializeConnection)
             }
             ContextCompat.startForegroundService(ctx, i)
         }

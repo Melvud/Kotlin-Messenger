@@ -246,8 +246,7 @@ class MainActivity : ComponentActivity() {
                                 username = fromName,
                                 isVideo = isVideo,
                                 openUi = false,
-                                playRingback = false,
-                                initializeConnection = true
+                                playRingback = false
                             )
 
                             navController.navigate(Routes.callRoute(callId, isVideo, fromName)) {
