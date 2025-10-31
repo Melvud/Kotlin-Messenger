@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.example.messenger_app.push
 
 import android.app.Notification
@@ -6,131 +8,125 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.media.AudioAttributes
-import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
+import kotlin.math.abs
 
 object NotificationHelper {
 
-    private const val CHANNEL_INCOMING_CALLS = "incoming_calls_v2"
+    const val CHANNEL_INCOMING_CALLS = "incoming_calls"
+    const val CHANNEL_ONGOING_CALLS = "ongoing_calls"
 
-    fun ensureChannels(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    fun ensureChannels(ctx: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-            val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        val incoming = NotificationChannel(
+            CHANNEL_INCOMING_CALLS,
+            "Incoming calls",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Ringing and incoming call alerts"
+            setShowBadge(false)
+            enableVibration(true)
+            val uri = Uri.parse("android.resource://${ctx.packageName}/${R.raw.ringing}")
             val attrs = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
-
-            val calls = NotificationChannel(
-                CHANNEL_INCOMING_CALLS,
-                context.getString(R.string.notif_channel_calls),
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = context.getString(R.string.notif_channel_calls_desc)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 900, 600, 900, 600, 1200)
-                setSound(ringtoneUri, attrs)
-                enableLights(true)
-                lightColor = Color.GREEN
-            }
-            mgr.createNotificationChannel(calls)
+            setSound(uri, attrs)
         }
+
+        val ongoing = NotificationChannel(
+            CHANNEL_ONGOING_CALLS,
+            "Ongoing calls",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Foreground call status"
+            setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+        }
+
+        nm.createNotificationChannel(incoming)
+        nm.createNotificationChannel(ongoing)
     }
 
-    fun cancelIncomingCall(context: Context, callId: String) {
-        NotificationManagerCompat.from(context).cancel(notificationIdFor(callId))
-    }
-
-    fun notificationIdFor(callId: String) = callId.hashCode()
-
-    /**
-     * Показ входящего звонка (без лишних «обычных» звуков).
-     * Кнопки действий передают корректный тип: "audio" | "video".
-     */
+    /** Heads-up полноэкранное уведомление для входящего звонка. */
     fun showIncomingCall(
-        context: Context,
+        ctx: Context,
         callId: String,
-        callType: String,        // "audio" | "video"
-        fromUsername: String
+        username: String,
+        isVideo: Boolean
     ) {
-        ensureChannels(context)
-        val notifId = notificationIdFor(callId)
+        ensureChannels(ctx)
 
-        // Тап по карточке — просто открыть приложение (без автопринятия)
-        val contentIntent = Intent(context, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra("source", "notification_tap")
-            putExtra("callId", callId)
-            putExtra("type", callType)
+        // Полноэкранный интент: просто открываем приложение с нужными deeplink_*,
+        // дальше MainActivity сам навигирует на CallScreen (роль "callee").
+        val fullScreen = Intent(ctx, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("deeplink_callId", callId)
+            putExtra("deeplink_isVideo", isVideo)
+            putExtra("deeplink_username", username)
         }
-        val contentPi = PendingIntent.getActivity(
-            context,
-            (notifId xor 0x77aa).and(0x7fffffff),
-            contentIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val fullScreenPi = PendingIntent.getActivity(
+            ctx,
+            (notificationIdFor(callId) shl 1),
+            fullScreen,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
-        // Отклонить
-        val declineIntent = Intent(context, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("action", "decline")
-            putExtra("callId", callId)
-            putExtra("type", callType)
-            putExtra("fromUsername", fromUsername)
-            putExtra("source", "notification_action")
-        }
-        val declinePi = PendingIntent.getActivity(
-            context,
-            (notifId xor 0x22bb).and(0x7fffffff),
-            declineIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        // Кнопки Accept/Decline остаются через BroadcastReceiver
+        val acceptPi = actionPi(ctx, CallActionReceiver.ACTION_INCOMING_ACCEPT, callId, username, isVideo)
+        val declinePi = actionPi(ctx, CallActionReceiver.ACTION_INCOMING_DECLINE, callId, username, isVideo)
 
-        // Принять
-        val acceptIntent = Intent(context, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("action", "accept")
-            putExtra("callId", callId)
-            putExtra("type", callType)
-            putExtra("fromUsername", fromUsername)
-            putExtra("source", "notification_action")
-        }
-        val acceptPi = PendingIntent.getActivity(
-            context,
-            (notifId xor 0x11aa).and(0x7fffffff),
-            acceptIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val title = when (callType.lowercase()) {
-            "video" -> context.getString(R.string.incoming_video_call_title)
-            else -> context.getString(R.string.incoming_audio_call_title)
-        }
-
-        val builder = NotificationCompat.Builder(context, CHANNEL_INCOMING_CALLS)
-            .setSmallIcon(R.drawable.ic_call)
-            .setContentTitle(title)
-            .setContentText(fromUsername)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        val n = NotificationCompat.Builder(ctx, CHANNEL_INCOMING_CALLS)
+            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+            .setContentTitle(if (isVideo) "Видео-звонок" else "Входящий звонок")
+            .setContentText(username.ifBlank { "Звонок" })
+            .setCategory(Notification.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setAutoCancel(false)
-            .setContentIntent(contentPi)
-            .setFullScreenIntent(contentPi, true)
-            .addAction(R.drawable.ic_decline, context.getString(R.string.call_decline), declinePi)
-            .addAction(R.drawable.ic_accept, context.getString(R.string.call_accept), acceptPi)
+            .setFullScreenIntent(fullScreenPi, true)
+            .addAction(android.R.drawable.ic_menu_call, "Принять", acceptPi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Отклонить", declinePi)
+            .build().apply { flags = flags or Notification.FLAG_INSISTENT }
 
-        NotificationManagerCompat.from(context).notify(notifId, builder.build())
+        NotificationManagerCompat.from(ctx).notify(notificationIdFor(callId), n)
+    }
+
+    fun cancelIncomingCall(ctx: Context, callId: String) {
+        NotificationManagerCompat.from(ctx).cancel(notificationIdFor(callId))
+    }
+
+    internal fun notificationIdFor(callId: String): Int = 0x5550000 + abs(callId.hashCode())
+
+    private fun actionPi(
+        ctx: Context,
+        action: String,
+        callId: String,
+        username: String,
+        isVideo: Boolean
+    ): PendingIntent {
+        val i = Intent(ctx, CallActionReceiver::class.java).apply {
+            this.action = action
+            putExtra(CallActionReceiver.EXTRA_CALL_ID, callId)
+            putExtra(CallActionReceiver.EXTRA_USERNAME, username)
+            putExtra(CallActionReceiver.EXTRA_IS_VIDEO, isVideo)
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
+        return PendingIntent.getBroadcast(
+            ctx,
+            (notificationIdFor(callId) shl 3) xor action.hashCode(),
+            i,
+            flags
+        )
     }
 }

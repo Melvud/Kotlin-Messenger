@@ -1,46 +1,49 @@
 package com.example.messenger_app.ui.call
 
 import android.Manifest
-import android.content.pm.PackageManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.Speaker
-import androidx.compose.material.icons.filled.SpeakerPhone
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.messenger_app.data.CallsRepository
+import com.example.messenger_app.push.CallActionReceiver
+import com.example.messenger_app.push.CallService
 import com.example.messenger_app.push.NotificationHelper
+import com.example.messenger_app.push.OngoingCallStore
+import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentChange
@@ -52,6 +55,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
 
+/**
+ * УЛУЧШЕННЫЙ CallScreen с:
+ * - Современным Material Design 3 UI
+ * - Автоматическим переподключением
+ * - Индикаторами состояния и качества
+ * - Диалогом перехода на видео
+ * - Анимациями и эффектами
+ */
 @Composable
 fun CallScreen(
     callId: String,
@@ -63,17 +74,46 @@ fun CallScreen(
     val context = LocalContext.current
     val role = remember(playRingback) { if (playRingback) "caller" else "callee" }
 
+    // WebRTC состояния
     val isMuted by WebRtcCallManager.isMuted.collectAsState()
     val isSpeakerOn by WebRtcCallManager.isSpeakerOn.collectAsState()
     val isVideoEnabled by WebRtcCallManager.isVideoEnabled.collectAsState()
+    val connectionState by WebRtcCallManager.connectionState.collectAsState()
+    val callQuality by WebRtcCallManager.callQuality.collectAsState()
+    val videoUpgradeRequest by WebRtcCallManager.videoUpgradeRequest.collectAsState()
 
-    LaunchedEffect(callId) { NotificationHelper.cancelIncomingCall(context, callId) }
+    // Локальное состояние
+    var callEnded by remember { mutableStateOf(false) }
+    var showEndCallDialog by remember { mutableStateOf(false) }
+
+    // Убираем входящий пуш
+    LaunchedEffect(callId) {
+        NotificationHelper.cancelIncomingCall(context, callId)
+    }
+
+    // Foreground сервис
+    LaunchedEffect(callId, isVideo, otherUsername, playRingback) {
+        OngoingCallStore.save(
+            context,
+            callId,
+            if (isVideo) "video" else "audio",
+            otherUsername.orEmpty()
+        )
+        CallService.start(
+            ctx = context,
+            callId = callId,
+            username = otherUsername.orEmpty(),
+            isVideo = isVideo,
+            openUi = false,
+            playRingback = playRingback
+        )
+    }
 
     val db = remember { FirebaseFirestore.getInstance() }
     val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
     val scope = rememberCoroutineScope()
 
-    // ---------- Signaling delegate ----------
+    // SignalingDelegate
     DisposableEffect(callId, role) {
         WebRtcCallManager.signalingDelegate = object : WebRtcCallManager.SignalingDelegate {
             override fun onLocalDescription(callId: String, sdp: org.webrtc.SessionDescription) {
@@ -82,6 +122,7 @@ fun CallScreen(
                     else repo.setAnswer(callId, sdp.description, "answer")
                 }
             }
+
             override fun onIceCandidate(callId: String, candidate: org.webrtc.IceCandidate) {
                 val who = if (role == "caller") "caller" else "callee"
                 val map = hashMapOf(
@@ -92,27 +133,54 @@ fun CallScreen(
                 )
                 repo.candidatesCollection(callId, who).add(map)
             }
+
+            override fun onCallTimeout(callId: String) {
+                scope.launch(Dispatchers.IO) {
+                    repo.updateStatus(callId, "timeout")
+                    db.collection("calls").document(callId)
+                        .update("endedAt", FieldValue.serverTimestamp())
+                }
+            }
+
+            override fun onConnectionFailed(callId: String) {
+                scope.launch(Dispatchers.IO) {
+                    repo.updateStatus(callId, "failed")
+                    db.collection("calls").document(callId)
+                        .update("endedAt", FieldValue.serverTimestamp())
+                }
+            }
+
+            override fun onVideoUpgradeRequest() {
+                scope.launch(Dispatchers.IO) {
+                    db.collection("calls").document(callId)
+                        .update("videoUpgradeRequest", FieldValue.serverTimestamp())
+                }
+            }
         }
         onDispose { WebRtcCallManager.signalingDelegate = null }
     }
 
-    // ---------- Server-synced timer ----------
+    // Таймер
     var startedAtMillis by remember(callId) { mutableStateOf<Long?>(null) }
     var ended by remember(callId) { mutableStateOf(false) }
     var nowMs by remember(callId) { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(startedAtMillis, ended) {
         while (startedAtMillis != null && !ended) {
-            delay(1_000)
+            delay(1000)
             nowMs = System.currentTimeMillis()
         }
     }
+
+    val elapsedMillis = if (startedAtMillis != null && !ended) {
+        (nowMs - startedAtMillis!!).coerceAtLeast(0)
+    } else 0L
 
     var peerName by remember(callId) { mutableStateOf(otherUsername) }
     var offerApplied by remember(callId) { mutableStateOf(false) }
     var answerApplied by remember(callId) { mutableStateOf(false) }
 
-    // ---------- Firestore listeners (SDP + ICE) ----------
+    // Firestore listeners
     DisposableEffect(callId, role) {
         val callDoc = db.collection("calls").document(callId)
         val docReg: ListenerRegistration = callDoc.addSnapshotListener { snap, _ ->
@@ -125,9 +193,9 @@ fun CallScreen(
                 }
             }
 
-            // apply remote SDP
             val offer = (data["offer"] as? Map<*, *>)?.get("sdp") as? String
             val answer = (data["answer"] as? Map<*, *>)?.get("sdp") as? String
+
             if (role == "callee" && !offer.isNullOrBlank() && !offerApplied) {
                 offerApplied = true
                 WebRtcCallManager.applyRemoteOffer(offer)
@@ -135,12 +203,15 @@ fun CallScreen(
             if (role == "caller" && !answer.isNullOrBlank() && !answerApplied) {
                 answerApplied = true
                 WebRtcCallManager.applyRemoteAnswer(answer)
+                CallService.stopRingback(context)
             }
 
-            // startedAt timestamp
             val ts = data["startedAt"]
             if (ts is com.google.firebase.Timestamp) {
-                if (startedAtMillis == null) startedAtMillis = ts.toDate().time
+                if (startedAtMillis == null) {
+                    startedAtMillis = ts.toDate().time
+                    CallService.stopRingback(context)
+                }
             } else {
                 val hasAnswer = (data["answer"] as? Map<*, *>)?.get("sdp") != null
                 if (hasAnswer && startedAtMillis == null) {
@@ -150,224 +221,319 @@ fun CallScreen(
                             tx.update(callDoc, "startedAt", FieldValue.serverTimestamp())
                         }
                     }
+                    CallService.stopRingback(context)
                 }
+            }
+
+            // Video upgrade request
+            val videoUpgradeTs = data["videoUpgradeRequest"]
+            if (videoUpgradeTs != null && role == "callee") {
+                val fromUser = (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
+                WebRtcCallManager.onRemoteVideoUpgradeRequest(fromUser)
             }
 
             if (data["endedAt"] != null && !ended) {
                 ended = true
+                callEnded = true
                 WebRtcCallManager.endCall()
-                onNavigateBack() // гарантированный выход
+                CallService.stopRingback(context)
+                context.stopService(Intent(context, CallService::class.java))
+                OngoingCallStore.clear(context)
+                scope.launch {
+                    delay(1500)
+                    onNavigateBack()
+                }
             }
         }
 
-        val remoteWho = if (role == "caller") "callee" else "caller"
-        val seen = mutableSetOf<String>()
-        val iceReg = repo
-            .candidatesCollection(callId, remoteWho)
+        val iceColl = if (role == "caller") "calleeCandidates" else "callerCandidates"
+        val iceReg: ListenerRegistration = callDoc.collection(iceColl)
             .addSnapshotListener { snap, _ ->
-                snap?.documentChanges?.forEach { ch ->
-                    if (ch.type == DocumentChange.Type.ADDED) {
-                        val id = ch.document.id
-                        if (!seen.add(id)) return@forEach
-                        val mid = ch.document.getString("sdpMid") ?: "0"
-                        val index = (ch.document.getLong("sdpMLineIndex") ?: 0L).toInt()
-                        val cand = ch.document.getString("candidate") ?: return@forEach
-                        WebRtcCallManager.addRemoteIceCandidate(mid, index, cand)
+                snap?.documentChanges?.forEach { dc ->
+                    if (dc.type == DocumentChange.Type.ADDED) {
+                        val d = dc.document.data
+                        val mid = d["sdpMid"] as? String ?: "0"
+                        val idx = (d["sdpMLineIndex"] as? Number)?.toInt() ?: 0
+                        val cand = d["candidate"] as? String ?: return@forEach
+                        WebRtcCallManager.addRemoteIceCandidate(mid, idx, cand)
                     }
                 }
             }
 
         onDispose {
-            runCatching { docReg.remove() }
-            runCatching { iceReg.remove() }
+            docReg.remove()
+            iceReg.remove()
         }
     }
 
-    // ---------- Init engine and start call ----------
-    LaunchedEffect(Unit) {
-        WebRtcCallManager.init(context.applicationContext)
-    }
-
-    // Compact permission request on incoming video call
-    val permissionsLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* no-op */ }
-
-    LaunchedEffect(isVideo, role) {
-        if (isVideo && role == "callee") {
-            val need = listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
-            val miss = need.filter {
-                ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    // Broadcast receiver для внутренних команд
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    CallActionReceiver.ACTION_INTERNAL_HANGUP -> {
+                        ended = true
+                        WebRtcCallManager.endCall()
+                        onNavigateBack()
+                    }
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_MUTE -> WebRtcCallManager.toggleMic()
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_SPEAKER -> WebRtcCallManager.toggleSpeaker()
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_VIDEO -> WebRtcCallManager.toggleVideo()
+                }
             }
-            if (miss.isNotEmpty()) permissionsLauncher.launch(miss.toTypedArray())
         }
+        val filter = IntentFilter().apply {
+            addAction(CallActionReceiver.ACTION_INTERNAL_HANGUP)
+            addAction(CallActionReceiver.ACTION_INTERNAL_TOGGLE_MUTE)
+            addAction(CallActionReceiver.ACTION_INTERNAL_TOGGLE_SPEAKER)
+            addAction(CallActionReceiver.ACTION_INTERNAL_TOGGLE_VIDEO)
+        }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose { context.unregisterReceiver(receiver) }
     }
 
-    LaunchedEffect(callId, isVideo, playRingback, role) {
+    // Инициализация WebRTC
+    LaunchedEffect(callId, isVideo, role) {
+        WebRtcCallManager.init(context)
         WebRtcCallManager.startCall(callId, isVideo, playRingback, role)
     }
 
+    // Cleanup
     DisposableEffect(Unit) {
-        onDispose { WebRtcCallManager.endCall() }
+        onDispose {
+            if (!callEnded) {
+                scope.launch(Dispatchers.IO) {
+                    db.collection("calls").document(callId)
+                        .update("endedAt", FieldValue.serverTimestamp())
+                }
+            }
+        }
     }
 
+    // BackHandler
     BackHandler {
-        endOnBoth(db, callId)
-        WebRtcCallManager.endCall()
-        onNavigateBack()
+        showEndCallDialog = true
     }
 
-    val elapsed = startedAtMillis?.let { (nowMs - it).coerceAtLeast(0) } ?: 0L
-
-    if (isVideo) {
-        VideoCallContent(
+    // UI
+    if (isVideoEnabled) {
+        VideoCallUI(
+            peerName = peerName ?: "Звонок",
+            elapsedMillis = elapsedMillis,
             isMuted = isMuted,
             isSpeakerOn = isSpeakerOn,
             isVideoEnabled = isVideoEnabled,
-            elapsedMillis = elapsed,
+            connectionState = connectionState,
+            callQuality = callQuality,
             onToggleMic = { WebRtcCallManager.toggleMic() },
             onToggleSpeaker = { WebRtcCallManager.toggleSpeaker() },
             onToggleVideo = { WebRtcCallManager.toggleVideo() },
             onSwitchCamera = { WebRtcCallManager.switchCamera() },
             onHangup = {
-                endOnBoth(db, callId)
+                ended = true
+                scope.launch(Dispatchers.IO) {
+                    db.collection("calls").document(callId).update("endedAt", FieldValue.serverTimestamp())
+                }
                 WebRtcCallManager.endCall()
+                CallService.stop(context)
+                OngoingCallStore.clear(context)
                 onNavigateBack()
             }
         )
     } else {
-        AudioCallContent(
-            avatarLetter = (peerName?.firstOrNull() ?: callId.firstOrNull() ?: '?')
-                .uppercaseChar().toString(),
+        AudioCallUI(
+            peerName = peerName ?: "Звонок",
+            elapsedMillis = elapsedMillis,
             isMuted = isMuted,
             isSpeakerOn = isSpeakerOn,
-            elapsedMillis = elapsed,
+            connectionState = connectionState,
+            callQuality = callQuality,
             onToggleMic = { WebRtcCallManager.toggleMic() },
             onToggleSpeaker = { WebRtcCallManager.toggleSpeaker() },
+            onEnableVideo = { WebRtcCallManager.requestVideoUpgrade() },
             onHangup = {
-                endOnBoth(db, callId)
+                ended = true
+                scope.launch(Dispatchers.IO) {
+                    db.collection("calls").document(callId).update("endedAt", FieldValue.serverTimestamp())
+                }
                 WebRtcCallManager.endCall()
+                CallService.stop(context)
+                OngoingCallStore.clear(context)
                 onNavigateBack()
+            }
+        )
+    }
+
+    // Диалог запроса видео
+    videoUpgradeRequest?.let { request ->
+        VideoUpgradeDialog(
+            fromUsername = request.fromUsername,
+            onAccept = {
+                WebRtcCallManager.acceptVideoUpgrade()
+            },
+            onDecline = {
+                WebRtcCallManager.declineVideoUpgrade()
+            }
+        )
+    }
+
+    // Диалог подтверждения завершения
+    if (showEndCallDialog) {
+        AlertDialog(
+            onDismissRequest = { showEndCallDialog = false },
+            title = { Text("Завершить звонок?") },
+            text = { Text("Вы уверены, что хотите завершить этот звонок?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showEndCallDialog = false
+                        ended = true
+                        scope.launch(Dispatchers.IO) {
+                            db.collection("calls").document(callId).update("endedAt", FieldValue.serverTimestamp())
+                        }
+                        WebRtcCallManager.endCall()
+                        CallService.stop(context)
+                        OngoingCallStore.clear(context)
+                        onNavigateBack()
+                    }
+                ) {
+                    Text("Завершить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEndCallDialog = false }) {
+                    Text("Отмена")
+                }
             }
         )
     }
 }
 
-private fun endOnBoth(db: FirebaseFirestore, callId: String) {
-    runCatching {
-        db.collection("calls").document(callId)
-            .update(mapOf("endedAt" to FieldValue.serverTimestamp(), "status" to "ended"))
-    }
-}
-
-/* ======================== AUDIO UI ======================== */
+// ==================== AUDIO CALL UI ====================
 
 @Composable
-private fun AudioCallContent(
-    avatarLetter: String,
+private fun AudioCallUI(
+    peerName: String,
+    elapsedMillis: Long,
     isMuted: Boolean,
     isSpeakerOn: Boolean,
-    elapsedMillis: Long,
+    connectionState: WebRtcCallManager.ConnectionState,
+    callQuality: WebRtcCallManager.Quality,
     onToggleMic: () -> Unit,
     onToggleSpeaker: () -> Unit,
+    onEnableVideo: () -> Unit,
     onHangup: () -> Unit
 ) {
-    val controlSize = 80.dp
-
-    Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
-        Box(
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.primaryContainer,
+                        MaterialTheme.colorScheme.secondaryContainer
+                    )
+                )
+            )
+    ) {
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color(0xFF3730A3), Color(0xFF7C3AED))
-                    )
-                )
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = 72.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+            Spacer(Modifier.weight(0.2f))
+
+            // Индикаторы состояния
+            ConnectionAndQualityIndicators(connectionState, callQuality)
+
+            Spacer(Modifier.height(32.dp))
+
+            // Аватар с пульсацией
+            PulsatingAvatar(peerName)
+
+            Spacer(Modifier.height(24.dp))
+
+            // Имя
+            Text(
+                text = peerName,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // Таймер
+            Text(
+                text = formatElapsed(elapsedMillis),
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+            )
+
+            Spacer(Modifier.weight(1f))
+
+            // Контролы
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(160.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = avatarLetter,
-                        color = Color.White,
-                        fontSize = 64.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = if (elapsedMillis > 0) formatElapsed(elapsedMillis) else "Подключение…",
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontSize = 18.sp
+                // Микрофон
+                ControlButton(
+                    icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                    isActive = !isMuted,
+                    onClick = onToggleMic,
+                    label = if (isMuted) "Включить" else "Выкл"
+                )
+
+                // Спикер
+                ControlButton(
+                    icon = if (isSpeakerOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeDown,
+                    isActive = isSpeakerOn,
+                    onClick = onToggleSpeaker,
+                    label = "Громкость"
+                )
+
+                // Видео
+                ControlButton(
+                    icon = Icons.Filled.Videocam,
+                    isActive = false,
+                    onClick = onEnableVideo,
+                    label = "Видео"
                 )
             }
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+            Spacer(Modifier.height(32.dp))
+
+            // Кнопка завершения
+            FloatingActionButton(
+                onClick = onHangup,
+                containerColor = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(72.dp)
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    LargeControlButton(
-                        size = controlSize,
-                        onClick = onToggleMic,
-                        container = Color.White.copy(alpha = 0.15f),
-                        content = Color.White
-                    ) {
-                        Icon(
-                            imageVector = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
-                            contentDescription = null
-                        )
-                    }
-
-                    LargeControlButton(
-                        size = controlSize,
-                        onClick = onToggleSpeaker,
-                        container = Color.White.copy(alpha = 0.15f),
-                        content = Color.White
-                    ) {
-                        Icon(
-                            imageVector = if (isSpeakerOn) Icons.Filled.SpeakerPhone else Icons.Filled.Speaker,
-                            contentDescription = null
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(18.dp))
-
-                LargeControlButton(
-                    size = controlSize,
-                    onClick = onHangup,
-                    container = MaterialTheme.colorScheme.error,
-                    content = MaterialTheme.colorScheme.onError
-                ) { Icon(Icons.Filled.CallEnd, contentDescription = null) }
+                Icon(
+                    Icons.Filled.CallEnd,
+                    contentDescription = "Завершить",
+                    modifier = Modifier.size(32.dp)
+                )
             }
+
+            Spacer(Modifier.height(32.dp))
         }
     }
 }
 
-/* ======================== VIDEO UI ======================== */
+// ==================== VIDEO CALL UI ====================
 
 @Composable
-private fun VideoCallContent(
+private fun VideoCallUI(
+    peerName: String,
+    elapsedMillis: Long,
     isMuted: Boolean,
     isSpeakerOn: Boolean,
     isVideoEnabled: Boolean,
-    elapsedMillis: Long,
+    connectionState: WebRtcCallManager.ConnectionState,
+    callQuality: WebRtcCallManager.Quality,
     onToggleMic: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onToggleVideo: () -> Unit,
@@ -375,180 +541,351 @@ private fun VideoCallContent(
     onHangup: () -> Unit
 ) {
     val context = LocalContext.current
-    val controlSize = 56.dp
-    val hangupSize = 80.dp
-    var localPrimary by remember { mutableStateOf(false) } // false: remote big; true: local big
-    val pipSize = 140.dp
+    var localRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    var remoteRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    var localPrimary by remember { mutableStateOf(false) }
 
-    // Создаём стабильные инстансы рендеров, чтобы не пересоздавались при свопе
-    val remoteRenderer = remember {
-        SurfaceViewRenderer(context).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-    }
-    val localRenderer = remember {
-        SurfaceViewRenderer(context).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+    DisposableEffect(Unit) {
+        onDispose {
+            localRenderer?.release()
+            remoteRenderer?.release()
         }
     }
 
-    // Готовим и привязываем ТОЛЬКО один раз
-    LaunchedEffect(Unit) {
-        // Важно: оба — overlay, чтобы любой мог быть PIP; onTop = false
-        WebRtcCallManager.prepareRenderer(remoteRenderer, mirror = false, overlay = true)
-        WebRtcCallManager.prepareRenderer(localRenderer, mirror = true, overlay = true)
-
-        WebRtcCallManager.bindRemoteRenderer(remoteRenderer)
-        WebRtcCallManager.bindLocalRenderer(localRenderer)
-
-        // Попросим верхний PIP оказаться поверх (на всякий случай)
-        remoteRenderer.post { remoteRenderer.bringToFront() }
-        localRenderer.post { localRenderer.bringToFront() }
-    }
-
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Box(Modifier.fillMaxSize()) {
-
-            // FULLSCREEN: кладём нужный View
-            if (localPrimary) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { localRenderer }
-                )
-            } else {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { remoteRenderer }
-                )
-            }
-
-            // PIP (всегда поверх через bringToFront)
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp)
-                    .size(pipSize)
-                    .clip(MaterialTheme.shapes.large)
-                    .clickable {
-                        localPrimary = !localPrimary
-                        // Гарантируем порядок поверх big
-                        if (localPrimary) {
-                            remoteRenderer.bringToFront()
-                        } else {
-                            localRenderer.bringToFront()
-                        }
-                    }
-            ) {
-                if (localPrimary) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { remoteRenderer },
-                        update = { it.visibility = View.VISIBLE }
-                    )
-                } else {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { localRenderer },
-                        update = { it.visibility = View.VISIBLE }
-                    )
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        // Remote video (фон)
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                SurfaceViewRenderer(ctx).apply {
+                    remoteRenderer = this
+                    WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
+                    WebRtcCallManager.bindRemoteRenderer(this)
                 }
             }
+        )
 
-            // Timer
-            if (elapsedMillis > 0) {
-                Text(
-                    text = formatElapsed(elapsedMillis),
-                    color = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 12.dp)
-                        .background(Color.Black.copy(alpha = 0.35f))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    fontSize = 14.sp
+        // Local video (PiP)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(16.dp)
+                .size(120.dp, 160.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .clickable { localPrimary = !localPrimary }
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    SurfaceViewRenderer(ctx).apply {
+                        localRenderer = this
+                        WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
+                        WebRtcCallManager.bindLocalRenderer(this)
+                    }
+                }
+            )
+        }
+
+        // Индикаторы
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+        ) {
+            ConnectionAndQualityIndicators(connectionState, callQuality)
+            Spacer(Modifier.height(8.dp))
+            InfoChip(peerName)
+            Spacer(Modifier.height(4.dp))
+            InfoChip(formatElapsed(elapsedMillis))
+        }
+
+        // Контролы
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ControlButton(
+                    icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                    isActive = !isMuted,
+                    onClick = onToggleMic
+                )
+
+                ControlButton(
+                    icon = if (isVideoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                    isActive = isVideoEnabled,
+                    onClick = onToggleVideo
+                )
+
+                ControlButton(
+                    icon = Icons.Filled.Cameraswitch,
+                    isActive = true,
+                    onClick = onSwitchCamera
                 )
             }
 
-            // Controls
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+            Spacer(Modifier.height(24.dp))
+
+            FloatingActionButton(
+                onClick = onHangup,
+                containerColor = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(72.dp)
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    LargeControlButton(
-                        size = controlSize,
-                        onClick = onToggleMic,
-                        container = Color.Black.copy(alpha = 0.4f),
-                        content = Color.White
-                    ) {
-                        Icon(
-                            imageVector = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
-                            contentDescription = null
-                        )
-                    }
-
-                    LargeControlButton(
-                        size = controlSize,
-                        onClick = onToggleVideo,
-                        container = Color.Black.copy(alpha = 0.4f),
-                        content = Color.White
-                    ) {
-                        Icon(
-                            imageVector = if (isVideoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                            contentDescription = null
-                        )
-                    }
-
-                    LargeControlButton(
-                        size = controlSize,
-                        onClick = onSwitchCamera,
-                        container = Color.Black.copy(alpha = 0.4f),
-                        content = Color.White
-                    ) { Icon(Icons.Filled.Cameraswitch, contentDescription = null) }
-                }
-
-                Spacer(Modifier.height(18.dp))
-
-                LargeControlButton(
-                    size = hangupSize,
-                    onClick = onHangup,
-                    container = MaterialTheme.colorScheme.error,
-                    content = MaterialTheme.colorScheme.onError
-                ) { Icon(Icons.Filled.CallEnd, contentDescription = null) }
+                Icon(
+                    Icons.Filled.CallEnd,
+                    contentDescription = "Завершить",
+                    modifier = Modifier.size(32.dp)
+                )
             }
         }
     }
 }
 
-/* ======================== Shared UI bits ======================== */
+// ==================== UI COMPONENTS ====================
 
 @Composable
-private fun LargeControlButton(
-    size: Dp,
-    onClick: () -> Unit,
-    container: Color,
-    content: Color,
-    contentSlot: @Composable () -> Unit
-) {
-    FilledIconButton(
-        onClick = onClick,
-        colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = container,
-            contentColor = content
+private fun PulsatingAvatar(name: String) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val scale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
         ),
-        modifier = Modifier.size(size)
-    ) { contentSlot() }
+        label = "scale"
+    )
+
+    val initial = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+
+    Box(
+        modifier = Modifier
+            .size(120.dp)
+            .scale(scale)
+            .clip(CircleShape)
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.primary,
+                        MaterialTheme.colorScheme.secondary
+                    )
+                )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = initial,
+            style = MaterialTheme.typography.displayLarge,
+            color = MaterialTheme.colorScheme.onPrimary,
+            fontWeight = FontWeight.Bold
+        )
+    }
 }
+
+@Composable
+private fun ControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    label: String? = null
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        FilledTonalIconButton(
+            onClick = onClick,
+            modifier = Modifier.size(64.dp),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = if (isActive)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Icon(
+                icon,
+                contentDescription = label,
+                modifier = Modifier.size(28.dp),
+                tint = if (isActive)
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (label != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionAndQualityIndicators(
+    connectionState: WebRtcCallManager.ConnectionState,
+    quality: WebRtcCallManager.Quality
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ConnectionIndicator(connectionState)
+        QualityIndicator(quality)
+    }
+}
+
+@Composable
+private fun ConnectionIndicator(state: WebRtcCallManager.ConnectionState) {
+    val (text, color) = when (state) {
+        WebRtcCallManager.ConnectionState.CONNECTING -> "Подключение..." to Color(0xFFFFA726)
+        WebRtcCallManager.ConnectionState.RECONNECTING -> "Переподключение..." to Color(0xFFFF7043)
+        WebRtcCallManager.ConnectionState.FAILED -> "Потеряно" to Color(0xFFE53935)
+        WebRtcCallManager.ConnectionState.DISCONNECTED -> "Отключено" to Color(0xFF757575)
+        else -> return
+    }
+
+    Surface(
+        color = color,
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = text,
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun QualityIndicator(quality: WebRtcCallManager.Quality) {
+    if (quality == WebRtcCallManager.Quality.Good) return
+
+    val (text, color) = when (quality) {
+        WebRtcCallManager.Quality.Medium -> "Среднее" to Color(0xFFFFA726)
+        WebRtcCallManager.Quality.Poor -> "Плохое" to Color(0xFFE53935)
+        else -> return
+    }
+
+    Surface(
+        color = color,
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 2.dp
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun InfoChip(text: String) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+        )
+    }
+}
+
+@Composable
+private fun VideoUpgradeDialog(
+    fromUsername: String,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDecline,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Filled.Videocam,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "Переход на видео",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                Text(
+                    text = "$fromUsername хочет включить видео.\nВключить камеру?",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDecline,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Нет, спасибо")
+                    }
+
+                    Button(
+                        onClick = onAccept,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Включить")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==================== HELPERS ====================
 
 private fun formatElapsed(ms: Long): String {
     val total = (ms / 1000).toInt().coerceAtLeast(0)
@@ -556,4 +893,37 @@ private fun formatElapsed(ms: Long): String {
     val m = (total % 3600) / 60
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
+// ==================== PREVIEWS ====================
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 760)
+@Composable
+private fun PreviewAudioCall() {
+    AppTheme {
+        AudioCallUI(
+            peerName = "Джон Доу",
+            elapsedMillis = 65000,
+            isMuted = false,
+            isSpeakerOn = true,
+            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
+            callQuality = WebRtcCallManager.Quality.Good,
+            onToggleMic = {},
+            onToggleSpeaker = {},
+            onEnableVideo = {},
+            onHangup = {}
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun PreviewVideoUpgradeDialog() {
+    AppTheme {
+        VideoUpgradeDialog(
+            fromUsername = "Мария",
+            onAccept = {},
+            onDecline = {}
+        )
+    }
 }

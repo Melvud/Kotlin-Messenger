@@ -1,33 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Разрешения -->
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-    <uses-permission android:name="android.permission.CAMERA"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <!-- Базовые разрешения -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
 
-    <!-- Foreground service (Android 14+) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <!-- (необязательно) Для audio route через BT на новых Android -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- Foreground service types -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- ВАЖНО: не используем FOREGROUND_SERVICE_PHONE_CALL, чтобы не требовались MANAGE_OWN_CALLS/роль Dialer -->
 
     <!-- Уведомления (Android 13+) -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-    android:maxSdkVersion="29"/>
+    <!-- Прочее, если использовалось ранее -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <application
         android:name=".App"
-        android:enableOnBackInvokedCallback="true"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -35,27 +51,30 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Antimax">
 
-        <!-- Главная активити + диплинк на звонок -->
+        <!-- Главная Activity + лаунчер + диплинк звонка -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize">
+
+            <!-- Launcher -->
             <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Deep link: messenger://call/{id} -->
+            <!-- Deep link, например messenger://call/{id} -->
             <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="messenger" android:host="call"/>
-                <!-- опционально можно добавить pathPrefix="/", но текущего фильтра достаточно -->
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="messenger" android:host="call" />
             </intent-filter>
         </activity>
+
+        <!-- FileProvider (если используется) -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -66,7 +85,7 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- FCM -->
+        <!-- Firebase Cloud Messaging -->
         <service
             android:name=".push.MyFirebaseMessagingService"
             android:exported="false"
@@ -75,13 +94,24 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
-        <receiver
-            android:name=".push.CallActionReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.example.messenger_app.ACTION_CALL_ACCEPT" />
-                <action android:name="com.example.messenger_app.ACTION_CALL_DECLINE" />
-            </intent-filter>
-        </receiver>
+
+        <!-- Foreground-сервис для удержания звонка в фоне/при выключенном экране
+             ВАЖНО: без phoneCall в типе -->
+
+
+    <service
+        android:name=".push.CallService"
+        android:foregroundServiceType="camera|microphone"
+        android:exported="false" />
+
+    <service
+        android:name=".push.CallTrampolineService"
+        android:exported="false" />
+
+    <receiver
+        android:name=".push.CallActionReceiver"
+        android:exported="true" />
+        <!-- Ресивер для действия "Завершить" из уведомления текущего звонка -->
+    
     </application>
 </manifest>

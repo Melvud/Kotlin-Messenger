@@ -1,4 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
@@ -15,8 +16,6 @@ type DeviceDoc = {
 /**
  * ОТПРАВКА ВЫЗОВА
  * Ожидает: { toUserId, fromUsername, callId, callType }
- * Берёт FCM-токены из users/{toUserId}/devices/* и шлёт data-push на ВСЕ устройства.
- * Битые токены удаляет (удаляет соответствующие документы devices/{deviceId}).
  */
 export const sendCallNotification = onCall(async (request) => {
   const { toUserId, fromUsername, callId, callType } = request.data || {};
@@ -28,7 +27,6 @@ export const sendCallNotification = onCall(async (request) => {
 
   const db = getFirestore();
 
-  // Собираем токены из саб-коллекции devices
   const devicesSnap = await db.collection("users").doc(toUserId).collection("devices").get();
   const tokens: string[] = [];
   const tokenToDocRef: Record<string, DocumentReference> = {};
@@ -66,7 +64,6 @@ export const sendCallNotification = onCall(async (request) => {
     `[sendCallNotification] sent: success=${res.successCount}, failure=${res.failureCount}`
   );
 
-  // Чистим битые токены — копим ссылки, потом одним батчем удалим их документы
   const invalidDocRefs: DocumentReference[] = [];
   res.responses.forEach((r, i) => {
     if (!r.success) {
@@ -91,7 +88,6 @@ export const sendCallNotification = onCall(async (request) => {
     console.log("[sendCallNotification] Removed invalid device docs:", invalidDocRefs.length);
   }
 
-  // (Необязательно) Сохраним снимок токенов в документе звонка — удобно для отладки
   try {
     await db.collection("calls").doc(callId).set({ calleeFcmTokens: tokens }, { merge: true });
   } catch (e) {
@@ -104,8 +100,6 @@ export const sendCallNotification = onCall(async (request) => {
 /**
  * ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ
  * Ожидает: { callId, acceptedToken }
- * Берёт calleeUid из calls/{callId}, вытягивает ВСЕ его токены из users/{calleeUid}/devices/*,
- * отфильтровывает токен принявшего устройства и шлёт остальным data "hangup".
  */
 export const hangupOtherDevices = onCall(async (request) => {
   const { callId, acceptedToken } = request.data || {};
@@ -129,7 +123,6 @@ export const hangupOtherDevices = onCall(async (request) => {
     throw new HttpsError("failed-precondition", "calleeUid is missing in call doc");
   }
 
-  // Все устройства адресата
   const devicesSnap = await db.collection("users").doc(String(calleeUid)).collection("devices").get();
   const tokens: string[] = [];
   const tokenToDocRef: Record<string, DocumentReference> = {};
@@ -163,7 +156,6 @@ export const hangupOtherDevices = onCall(async (request) => {
     `[hangupOtherDevices] sent: success=${res.successCount}, failure=${res.failureCount}`
   );
 
-  // Чистка битых токенов — аналогично
   const invalidDocRefs: DocumentReference[] = [];
   res.responses.forEach((r, i) => {
     if (!r.success) {
@@ -190,3 +182,121 @@ export const hangupOtherDevices = onCall(async (request) => {
 
   return { success: true, sent: res.successCount, failed: res.failureCount };
 });
+
+/**
+ * НОВОЕ: Автоматическое завершение звонков по таймауту
+ * Триггер: когда звонок обновляется и прошло 30+ секунд с момента создания
+ */
+export const autoEndCallOnTimeout = onDocumentUpdated(
+  "calls/{callId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+
+    if (!after) return;
+
+    // Если звонок уже завершен, ничего не делаем
+    if (after.endedAt || after.status === "ended" || after.status === "timeout") {
+      return;
+    }
+
+    // Проверяем, прошло ли 30 секунд с момента создания
+    const createdAt = after.createdAt;
+    if (!createdAt || !createdAt.toDate) return;
+
+    const now = Date.now();
+    const created = createdAt.toDate().getTime();
+    const elapsed = now - created;
+
+    // Если прошло больше 30 секунд и нет startedAt (звонок не был принят)
+    if (elapsed > 30000 && !after.startedAt && !before?.endedAt) {
+      console.log(`[autoEndCallOnTimeout] Ending call ${event.params.callId} due to timeout`);
+
+      const db = getFirestore();
+      await db.collection("calls").doc(event.params.callId).update({
+        endedAt: new Date(),
+        status: "timeout"
+      });
+
+      // Отправляем уведомление caller'у о таймауте
+      const callerUid = after.callerUid;
+      if (callerUid) {
+        const devicesSnap = await db.collection("users").doc(String(callerUid)).collection("devices").get();
+        const tokens: string[] = [];
+        devicesSnap.docs.forEach((d) => {
+          const t = (d.data() as DeviceDoc).token;
+          if (typeof t === "string" && t.length > 0) tokens.push(t);
+        });
+
+        if (tokens.length > 0) {
+          await getMessaging().sendEachForMulticast({
+            tokens,
+            data: {
+              type: "call_timeout",
+              callId: String(event.params.callId)
+            },
+            android: { priority: "high" as const }
+          });
+        }
+      }
+    }
+  }
+);
+
+/**
+ * НОВОЕ: Уведомление о запросе перехода на видео
+ * Триггер: когда в документе звонка появляется videoUpgradeRequest
+ */
+export const notifyVideoUpgrade = onDocumentUpdated(
+  "calls/{callId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+
+    if (!after) return;
+
+    // Проверяем, появился ли новый videoUpgradeRequest
+    const hadRequest = before?.videoUpgradeRequest;
+    const hasRequest = after.videoUpgradeRequest;
+
+    if (!hadRequest && hasRequest) {
+      console.log(`[notifyVideoUpgrade] Video upgrade requested for call ${event.params.callId}`);
+
+      const db = getFirestore();
+
+      // Определяем, кому отправлять (противоположная сторона от того, кто запросил)
+      const callerUid = after.callerUid;
+      const calleeUid = after.calleeUid;
+
+      // Предполагаем, что запрос идет от caller к callee (можно улучшить логику)
+      const targetUid = calleeUid;
+
+      if (targetUid) {
+        const devicesSnap = await db.collection("users").doc(String(targetUid)).collection("devices").get();
+        const tokens: string[] = [];
+        devicesSnap.docs.forEach((d) => {
+          const t = (d.data() as DeviceDoc).token;
+          if (typeof t === "string" && t.length > 0) tokens.push(t);
+        });
+
+        if (tokens.length > 0) {
+          // Получаем имя запросившего
+          const callerDoc = await db.collection("users").doc(String(callerUid)).get();
+          const fromUsername = callerDoc.data()?.username || callerDoc.data()?.name || "Собеседник";
+
+          await getMessaging().sendEachForMulticast({
+            tokens,
+            data: {
+              type: "video_upgrade_request",
+              callId: String(event.params.callId),
+              fromUsername: String(fromUsername)
+            },
+            android: { priority: "high" as const }
+          });
+
+          console.log(`[notifyVideoUpgrade] Sent video upgrade notification to ${tokens.length} devices`);
+        }
+      }
+    }
+  }
+);

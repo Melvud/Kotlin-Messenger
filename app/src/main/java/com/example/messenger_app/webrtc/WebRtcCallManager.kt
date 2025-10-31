@@ -4,6 +4,7 @@ package com.example.messenger_app.webrtc
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
@@ -41,9 +42,18 @@ import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * УЛУЧШЕННЫЙ WebRTC менеджер с:
+ * - Автоматическим переподключением при потере связи
+ * - Таймаутом звонка в 30 секунд для исходящих
+ * - Поддержкой перехода аудио -> видео с уведомлением
+ */
 object WebRtcCallManager {
 
     private const val TAG = "WebRtcCallManager"
+    private const val CALL_TIMEOUT_MS = 30_000L // 30 секунд таймаут
+    private const val RECONNECT_ATTEMPTS = 3 // попыток переподключения
+    private const val RECONNECT_DELAY_MS = 2_000L // задержка между попытками
 
     // ---------- public UI state ----------
     private val _isMuted = MutableStateFlow(false)
@@ -58,10 +68,27 @@ object WebRtcCallManager {
     private val _callStartedAtMs = MutableStateFlow<Long?>(null)
     val callStartedAtMs: StateFlow<Long?> = _callStartedAtMs
 
+    // НОВОЕ: Индикатор состояния соединения
+    enum class ConnectionState { CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, FAILED }
+    private val _connectionState = MutableStateFlow(ConnectionState.CONNECTING)
+    val connectionState: StateFlow<ConnectionState> = _connectionState
+
+    // НОВОЕ: Запрос на переход в видео режим
+    data class VideoUpgradeRequest(val fromUsername: String)
+    private val _videoUpgradeRequest = MutableStateFlow<VideoUpgradeRequest?>(null)
+    val videoUpgradeRequest: StateFlow<VideoUpgradeRequest?> = _videoUpgradeRequest
+
+    enum class Quality { Good, Medium, Poor }
+    private val _callQuality = MutableStateFlow(Quality.Good)
+    val callQuality: StateFlow<Quality> = _callQuality
+
     // ---------- signaling ----------
     interface SignalingDelegate {
         fun onLocalDescription(callId: String, sdp: SessionDescription)
         fun onIceCandidate(callId: String, candidate: IceCandidate)
+        fun onCallTimeout(callId: String) // НОВОЕ: таймаут звонка
+        fun onConnectionFailed(callId: String) // НОВОЕ: не удалось переподключиться
+        fun onVideoUpgradeRequest() // НОВОЕ: запрос перехода на видео
     }
     @Volatile
     var signalingDelegate: SignalingDelegate? = null
@@ -88,8 +115,16 @@ object WebRtcCallManager {
     private var audioFocusRequest: AudioFocusRequest? = null
 
     private var currentCallId: String? = null
+    private var currentRole: String? = null
 
     private val isStarted = AtomicBoolean(false)
+
+    // НОВОЕ: Переподключение
+    private var reconnectAttempt = 0
+    private var reconnectRunnable: Runnable? = null
+
+    // НОВОЕ: Таймер таймаута звонка
+    private var timeoutRunnable: Runnable? = null
 
     // renderers
     private var localRendererRef: WeakReference<SurfaceViewRenderer>? = null
@@ -113,8 +148,8 @@ object WebRtcCallManager {
 
         val encoderFactory = DefaultVideoEncoderFactory(
             eglBase!!.eglBaseContext,
-            /* enableIntelVp8Encoder = */ true,
-            /* enableH264HighProfile = */ true
+            true,
+            true
         )
         val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
 
@@ -135,17 +170,16 @@ object WebRtcCallManager {
         Log.d(TAG, "Initialized")
     }
 
-    // ---------- renderer prep (call from UI before addSink) ----------
+    // ---------- renderer prep ----------
     fun prepareRenderer(
         view: SurfaceViewRenderer,
         mirror: Boolean,
-        overlay: Boolean // onTop всегда false
+        overlay: Boolean
     ) {
         val ctx = eglBase?.eglBaseContext ?: return
         val firstInit = !initializedRenderers.contains(view)
 
         if (firstInit) {
-            // ВАЖНО: порядок — сначала З-order, потом init()
             view.setZOrderOnTop(false)
             view.setZOrderMediaOverlay(overlay)
             view.init(ctx, null)
@@ -173,28 +207,38 @@ object WebRtcCallManager {
         endCallInternal(true)
 
         currentCallId = callId
+        currentRole = role
         isStarted.set(true)
         _isVideoEnabled.value = isVideo
         _callStartedAtMs.value = null
+        _callQuality.value = Quality.Good
+        _connectionState.value = ConnectionState.CONNECTING
+        reconnectAttempt = 0
 
         setupAudioForCall(videoMode = isVideo)
 
-        // ---- Единственное изменение: актуальный STUN/TURN для sil-video.ru ----
+        // НОВОЕ: Таймаут для caller
+        if (role == "caller") {
+            startCallTimeout(callId)
+        }
+
         val iceServers = listOf(
-            IceServer.builder("stun:sil-video.ru:3478")
-                .createIceServer(),
+            IceServer.builder("stun:sil-video.ru:3478").createIceServer(),
             IceServer.builder("turn:sil-video.ru:3478?transport=udp")
                 .setUsername("melvud").setPassword("berkut14").createIceServer(),
             IceServer.builder("turn:sil-video.ru:3478?transport=tcp")
                 .setUsername("melvud").setPassword("berkut14").createIceServer(),
-            // Ключевое для сетей в РФ — TLS на 443 поверх TCP:
             IceServer.builder("turns:sil-video.ru:443?transport=tcp")
                 .setUsername("melvud").setPassword("berkut14").createIceServer()
         )
-        // ----------------------------------------------------------------------
 
         val rtcConfig = RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            // УЛУЧШЕНИЕ: Настройки для более стабильного соединения
+            iceTransportsType = PeerConnection.IceTransportsType.ALL
+            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+            rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }
 
         peer = pcFactory!!.createPeerConnection(rtcConfig, pcObserver) ?: run {
@@ -205,7 +249,6 @@ object WebRtcCallManager {
 
         // Local audio
         val audioConstraints = MediaConstraints().apply {
-            // Улучшение качества звука
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
@@ -222,6 +265,25 @@ object WebRtcCallManager {
         if (role == "caller") createOffer()
     }
 
+    // НОВОЕ: Таймаут для звонков
+    private fun startCallTimeout(callId: String) {
+        cancelCallTimeout()
+        timeoutRunnable = Runnable {
+            if (currentCallId == callId && _connectionState.value != ConnectionState.CONNECTED) {
+                Log.w(TAG, "Call timeout reached")
+                _connectionState.value = ConnectionState.FAILED
+                signalingDelegate?.onCallTimeout(callId)
+                endCallInternal(true)
+            }
+        }
+        mainHandler.postDelayed(timeoutRunnable!!, CALL_TIMEOUT_MS)
+    }
+
+    private fun cancelCallTimeout() {
+        timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        timeoutRunnable = null
+    }
+
     fun endCall() {
         Log.d(TAG, "endCall()")
         endCallInternal(true)
@@ -233,6 +295,10 @@ object WebRtcCallManager {
 
         isStarted.set(false)
         _callStartedAtMs.value = null
+        _connectionState.value = ConnectionState.DISCONNECTED
+
+        cancelCallTimeout()
+        cancelReconnect()
 
         try { peer?.close() } catch (_: Throwable) {}
         peer = null
@@ -248,11 +314,47 @@ object WebRtcCallManager {
         detachRenderer(false)
 
         teardownAudio()
+
+        currentCallId = null
+        currentRole = null
+    }
+
+    // ---------- НОВОЕ: Переподключение ----------
+    private fun attemptReconnect() {
+        if (reconnectAttempt >= RECONNECT_ATTEMPTS) {
+            Log.e(TAG, "Max reconnect attempts reached")
+            _connectionState.value = ConnectionState.FAILED
+            signalingDelegate?.onConnectionFailed(currentCallId ?: return)
+            endCallInternal(true)
+            return
+        }
+
+        reconnectAttempt++
+        _connectionState.value = ConnectionState.RECONNECTING
+        Log.d(TAG, "Reconnect attempt $reconnectAttempt/$RECONNECT_ATTEMPTS")
+
+        // Пробуем перезапустить ICE
+        peer?.restartIce()
+
+        // Планируем следующую попытку
+        reconnectRunnable = Runnable {
+            if (_connectionState.value == ConnectionState.RECONNECTING) {
+                attemptReconnect()
+            }
+        }
+        mainHandler.postDelayed(reconnectRunnable!!, RECONNECT_DELAY_MS)
+    }
+
+    private fun cancelReconnect() {
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
+        reconnectAttempt = 0
     }
 
     // ---------- audio ----------
     private fun setupAudioForCall(videoMode: Boolean) {
         val am = audioManager ?: return
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val afr = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
                 .setAudioAttributes(
@@ -268,9 +370,16 @@ object WebRtcCallManager {
             am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         }
         am.mode = AudioManager.MODE_IN_COMMUNICATION
-        val useSpeaker = videoMode
-        am.isSpeakerphoneOn = useSpeaker
-        _isSpeakerOn.value = useSpeaker
+
+        val shouldUseSpeaker = when {
+            videoMode -> true
+            deviceHasNoEarpiece(am) -> true
+            isEmulator() -> true
+            hasHeadsetOrBt(am) -> false
+            else -> false
+        }
+        setSpeakerphone(am, shouldUseSpeaker)
+
         _isMuted.value = false
     }
 
@@ -295,9 +404,47 @@ object WebRtcCallManager {
 
     fun toggleSpeaker() {
         val am = audioManager ?: return
-        val newState = !am.isSpeakerphoneOn
-        am.isSpeakerphoneOn = newState
-        _isSpeakerOn.value = newState
+        setSpeakerphone(am, !am.isSpeakerphoneOn)
+    }
+
+    private fun setSpeakerphone(am: AudioManager, on: Boolean) {
+        am.isSpeakerphoneOn = on
+        _isSpeakerOn.value = on
+        Log.d(TAG, "Speakerphone=$on")
+    }
+
+    private fun deviceHasNoEarpiece(am: AudioManager): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .none { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+        } else {
+            true
+        }
+    }
+
+    private fun hasHeadsetOrBt(am: AudioManager): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+                when (it.type) {
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_USB_HEADSET,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> true
+                    else -> false
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            am.isWiredHeadsetOn || am.isBluetoothScoOn || am.isBluetoothA2dpOn
+        }
+    }
+
+    private fun isEmulator(): Boolean {
+        val fp = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val product = Build.PRODUCT.lowercase()
+        return fp.contains("generic") || model.contains("emulator") || product.contains("sdk")
     }
 
     // ---------- video ----------
@@ -322,7 +469,6 @@ object WebRtcCallManager {
 
         peer?.addTrack(videoTrack)
 
-        // If renderer already bound — attach immediately
         localRendererRef?.get()?.let { attachLocalSinkTo(it) }
     }
 
@@ -339,11 +485,41 @@ object WebRtcCallManager {
         videoCapturer?.switchCamera(null)
     }
 
+    // НОВОЕ: Переход с аудио на видео с уведомлением собеседника
+    fun requestVideoUpgrade() {
+        if (_isVideoEnabled.value) return
+
+        // Уведомляем другую сторону через signaling
+        signalingDelegate?.onVideoUpgradeRequest()
+
+        // Включаем локальное видео
+        toggleVideo()
+    }
+
+    // НОВОЕ: Принять запрос на видео от собеседника
+    fun acceptVideoUpgrade() {
+        _videoUpgradeRequest.value = null
+        if (!_isVideoEnabled.value) {
+            toggleVideo()
+        }
+    }
+
+    // НОВОЕ: Отклонить запрос на видео
+    fun declineVideoUpgrade() {
+        _videoUpgradeRequest.value = null
+    }
+
+    // НОВОЕ: Обработка входящего запроса на видео
+    fun onRemoteVideoUpgradeRequest(fromUsername: String) {
+        _videoUpgradeRequest.value = VideoUpgradeRequest(fromUsername)
+    }
+
     fun toggleVideo() {
         val willEnable = !_isVideoEnabled.value
         _isVideoEnabled.value = willEnable
         if (willEnable) {
             if (videoTrack == null) createAndStartLocalVideo() else videoTrack?.setEnabled(true)
+            audioManager?.let { setSpeakerphone(it, true) }
         } else {
             videoTrack?.setEnabled(false)
         }
@@ -478,14 +654,56 @@ object WebRtcCallManager {
 
     private val pcObserver = object : PeerConnection.Observer {
         override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
-        override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {}
+        override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
+            // УЛУЧШЕНИЕ: Обработка состояний соединения
+            when (newState) {
+                PeerConnection.PeerConnectionState.CONNECTED -> {
+                    _connectionState.value = ConnectionState.CONNECTED
+                    cancelCallTimeout()
+                    cancelReconnect()
+                }
+                PeerConnection.PeerConnectionState.DISCONNECTED -> {
+                    if (_connectionState.value == ConnectionState.CONNECTED) {
+                        // Была связь, потерялась - пробуем переподключиться
+                        Log.w(TAG, "Connection lost, attempting reconnect")
+                        attemptReconnect()
+                    }
+                }
+                PeerConnection.PeerConnectionState.FAILED -> {
+                    _connectionState.value = ConnectionState.FAILED
+                    Log.e(TAG, "Connection failed")
+                }
+                else -> {}
+            }
+        }
 
         override fun onIceConnectionReceivingChange(p0: Boolean) {}
         override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
 
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
-            if (state == PeerConnection.IceConnectionState.CONNECTED) {
-                if (_callStartedAtMs.value == null) _callStartedAtMs.value = System.currentTimeMillis()
+            when (state) {
+                PeerConnection.IceConnectionState.CONNECTED -> {
+                    if (_callStartedAtMs.value == null) {
+                        _callStartedAtMs.value = System.currentTimeMillis()
+                    }
+                    _connectionState.value = ConnectionState.CONNECTED
+                    cancelCallTimeout()
+                    cancelReconnect()
+                }
+                PeerConnection.IceConnectionState.DISCONNECTED -> {
+                    // Проверяем, не в процессе ли уже переподключения
+                    if (_connectionState.value == ConnectionState.CONNECTED) {
+                        Log.w(TAG, "ICE disconnected, attempting reconnect")
+                        attemptReconnect()
+                    }
+                }
+                PeerConnection.IceConnectionState.FAILED -> {
+                    if (_connectionState.value != ConnectionState.FAILED) {
+                        Log.e(TAG, "ICE connection failed")
+                        _connectionState.value = ConnectionState.FAILED
+                    }
+                }
+                else -> {}
             }
         }
 
@@ -495,13 +713,11 @@ object WebRtcCallManager {
             signalingDelegate?.onIceCandidate(id, c)
         }
 
-        // Unified Plan
         override fun onTrack(transceiver: RtpTransceiver?) {
             val track = transceiver?.receiver?.track() ?: return
             handleRemoteTrack(track)
         }
 
-        // Plan B fallback
         override fun onAddStream(stream: org.webrtc.MediaStream?) {
             stream?.videoTracks?.firstOrNull()?.let { handleRemoteTrack(it) }
         }
@@ -515,6 +731,14 @@ object WebRtcCallManager {
         }
 
         override fun onRenegotiationNeeded() {}
+    }
+
+    fun updateQualityFromStats(bitrateKbps: Int, rttMs: Int, packetLossPct: Int) {
+        _callQuality.value = when {
+            packetLossPct >= 10 || rttMs >= 800 || bitrateKbps < 200 -> Quality.Poor
+            packetLossPct >= 3 || rttMs >= 250 || bitrateKbps < 600 -> Quality.Medium
+            else -> Quality.Good
+        }
     }
 
     abstract class SdpObserverAdapter : SdpObserver {

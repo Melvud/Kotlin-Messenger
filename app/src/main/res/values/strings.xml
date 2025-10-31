@@ -1,14 +1,28 @@
 <resources>
-    <string name="app_name">antimax</string>
-    <!-- Notification channels -->
-    <string name="notif_channel_calls">Calls</string>
-    <string name="notif_channel_calls_desc">Incoming and ongoing calls</string>
+    <string name="app_name">Antimax</string>
 
-    <!-- Titles -->
-    <string name="incoming_video_call_title">Incoming video call</string>
-    <string name="incoming_audio_call_title">Incoming audio call</string>
+    <string name="channel_incoming_calls_name">Входящие звонки</string>
+    <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>
+    <string name="channel_ongoing_calls_name">Идёт звонок</string>
+    <string name="channel_ongoing_calls_desc">Постоянное уведомление активного звонка</string>
 
-    <!-- Actions -->
-    <string name="call_accept">Accept</string>
-    <string name="call_decline">Decline</string>
+    <string name="incoming_audio_call_title">Входящий аудиозвонок</string>
+    <string name="incoming_video_call_title">Входящий видеозвонок</string>
+
+    <string name="ongoing_audio_call_title">Аудиозвонок</string>
+    <string name="ongoing_video_call_title">Видеозвонок</string>
+
+    <string name="call_accept">Принять</string>
+    <string name="call_decline">Отклонить</string>
+    <string name="action_open">Open</string>
+    <string name="action_answer">Answer</string>
+    <string name="action_decline">Decline</string>
+    <string name="action_hangup">Завершить</string>
+    <string name="action_mute">Микрофон</string>
+    <string name="action_speaker">Динамик</string>
+    <string name="action_video">Камера</string>
+
+    <string name="call_ongoing_audio">Идёт аудиозвонок</string>
+    <string name="call_ongoing_video">Идёт видеозвонок</string>
+    <string name="tap_to_return">нажмите, чтобы вернуться</string>
 </resources>
