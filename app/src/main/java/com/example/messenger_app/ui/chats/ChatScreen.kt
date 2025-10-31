@@ -3,6 +3,7 @@
 package com.example.messenger_app.ui.chats
 
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -93,54 +94,94 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    // Устанавливаем активный чат при входе
+    // ИСПРАВЛЕННЫЕ LaunchedEffect и DisposableEffect для ChatScreen.kt
+// Замените существующие на эти:
+
+// Устанавливаем активный чат при входе (это автоматически пометит сообщения как прочитанные)
     LaunchedEffect(actualChatId) {
-        actualChatId?.let { chatRepo.setActiveChat(it) }
-    }
-
-    // Очищаем активный чат при выходе
-    DisposableEffect(Unit) {
-        onDispose {
-            scope.launch {
-                chatRepo.setActiveChat(null)
-                actualChatId?.let { chatRepo.setTyping(it, false) }
-            }
-        }
-    }
-
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
-    }
-
-    LaunchedEffect(messages, actualChatId) {
-        // Если у нас ещё нет actualChatId, попробуем создать/получить его (новый чат).
-        if ((actualChatId == null || actualChatId!!.isBlank()) && messages.isNotEmpty()) {
+        if (actualChatId != null && actualChatId!!.isNotBlank()) {
+            Log.d("ChatScreen", "Setting active chat: $actualChatId")
             try {
-                actualChatId = chatRepo.getOrCreateChat(otherUserId)
+                chatRepo.setActiveChat(actualChatId)
             } catch (e: Exception) {
-                // логируем, но продолжаем — не хотим крушить UI
+                Log.e("ChatScreen", "Error setting active chat", e)
                 e.printStackTrace()
             }
         }
+    }
 
-        if (actualChatId != null && actualChatId!!.isNotBlank()) {
-            val unreadMessages = messages
-                .filter { it.senderId != myUid && it.status != MessageStatus.READ }
-                .map { it.id }
-            if (unreadMessages.isNotEmpty()) {
+// Очищаем активный чат при выходе
+    DisposableEffect(Unit) {
+        onDispose {
+            scope.launch {
                 try {
-                    chatRepo.markMessagesAsRead(actualChatId!!, unreadMessages)
+                    chatRepo.setActiveChat(null)
+                    actualChatId?.let {
+                        if (it.isNotBlank()) {
+                            chatRepo.setTyping(it, false)
+                        }
+                    }
+                    Log.d("ChatScreen", "Cleared active chat")
                 } catch (e: Exception) {
+                    Log.e("ChatScreen", "Error clearing active chat", e)
                     e.printStackTrace()
                 }
             }
         }
     }
 
+// Автопрокрутка к последнему сообщению
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            delay(100) // Небольшая задержка для завершения рендеринга
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
 
-    // Обработка печати
+// ИСПРАВЛЕНО: Создание чата если его еще нет
+    LaunchedEffect(actualChatId, otherUserId) {
+        if ((actualChatId == null || actualChatId!!.isBlank()) && otherUserId.isNotBlank()) {
+            try {
+                Log.d("ChatScreen", "Creating chat with user: $otherUserId")
+                val newChatId = chatRepo.getOrCreateChat(otherUserId)
+                actualChatId = newChatId
+                Log.d("ChatScreen", "Chat created/found: $newChatId")
+
+                // Устанавливаем как активный
+                chatRepo.setActiveChat(newChatId)
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Error creating/getting chat", e)
+                e.printStackTrace()
+            }
+        }
+    }
+
+// ДОПОЛНИТЕЛЬНО: Помечаем сообщения как прочитанные при изменении списка
+// (на случай если новые сообщения пришли пока чат активен)
+    LaunchedEffect(messages) {
+        if (actualChatId != null && actualChatId!!.isNotBlank() && messages.isNotEmpty()) {
+            delay(500) // Даем пользователю время увидеть сообщения
+
+            val unreadMessages = messages
+                .filter { msg ->
+                    msg.senderId != myUid &&
+                            (msg.status == MessageStatus.SENT || msg.status == MessageStatus.DELIVERED)
+                }
+                .map { it.id }
+
+            if (unreadMessages.isNotEmpty()) {
+                try {
+                    Log.d("ChatScreen", "Marking ${unreadMessages.size} messages as read")
+                    chatRepo.markMessagesAsRead(actualChatId!!, unreadMessages)
+                } catch (e: Exception) {
+                    Log.e("ChatScreen", "Error marking messages as read", e)
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+// Обработка печати (без изменений, но добавим проверку)
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
     LaunchedEffect(messageText, actualChatId) {
         typingJob?.cancel()

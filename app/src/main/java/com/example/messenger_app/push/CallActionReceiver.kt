@@ -14,8 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * ИСПРАВЛЕНО: Правильная обработка принятия звонка
- * Сначала открываем Activity, потом уже стартуем сервис
+ * ИСПРАВЛЕНО: Правильная обработка принятия звонка с передачей role
  */
 class CallActionReceiver : BroadcastReceiver() {
 
@@ -31,7 +30,7 @@ class CallActionReceiver : BroadcastReceiver() {
 
         when (action) {
             ACTION_INCOMING_ACCEPT -> {
-                // ИСПРАВЛЕНИЕ: Закрываем уведомление
+                // Закрываем уведомление
                 NotificationHelper.cancelIncomingCall(ctx, callId)
 
                 // Сохраняем состояние звонка
@@ -49,14 +48,15 @@ class CallActionReceiver : BroadcastReceiver() {
                     }
                 }
 
-                // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Сначала открываем Activity
-                // Activity сама запустит CallService когда будет в foreground
+                // ИСПРАВЛЕНИЕ: Передаем правильные параметры для входящего звонка
                 val activityIntent = Intent(ctx, MainActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     putExtra("action", "accept")
                     putExtra("callId", callId)
                     putExtra("isVideo", isVideo)
                     putExtra("username", username)
+                    putExtra("role", "callee") // ВАЖНО: явно указываем роль
+                    putExtra("playRingback", false) // Входящий звонок не играет ringback
                 }
                 ctx.startActivity(activityIntent)
             }
@@ -71,7 +71,10 @@ class CallActionReceiver : BroadcastReceiver() {
                 scope.launch {
                     try {
                         db.collection("calls").document(callId)
-                            .update("status", "declined", "endedAt", com.google.firebase.firestore.FieldValue.serverTimestamp())
+                            .update(
+                                "status", if (action == ACTION_INCOMING_DECLINE) "declined" else "ended",
+                                "endedAt", com.google.firebase.firestore.FieldValue.serverTimestamp()
+                            )
                     } catch (e: Exception) {
                         Log.w("CallActionReceiver", "Failed to update call status", e)
                     }

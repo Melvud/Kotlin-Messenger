@@ -24,13 +24,88 @@ class ChatRepository(
         ?: error("User not authenticated")
 
     /**
-     * НОВОЕ: Установить активный чат для предотвращения уведомлений
+     * ИСПРАВЛЕНО: Установить активный чат и пометить все сообщения как прочитанные
      */
     suspend fun setActiveChat(chatId: String?) {
         val myUid = requireUid()
-        db.collection("users").document(myUid)
-            .update("activeChat", chatId ?: FieldValue.delete())
-            .await()
+
+        if (chatId != null && chatId.isNotBlank()) {
+            // Сначала помечаем сообщения как прочитанные
+            markAllMessagesAsRead(chatId)
+
+            // Затем устанавливаем активный чат
+            db.collection("users").document(myUid)
+                .update("activeChat", chatId)
+                .await()
+        } else {
+            // Очищаем активный чат
+            db.collection("users").document(myUid)
+                .update("activeChat", FieldValue.delete())
+                .await()
+        }
+    }
+
+    /**
+     * НОВОЕ: Пометить ВСЕ непрочитанные сообщения чата как прочитанные
+     */
+    private suspend fun markAllMessagesAsRead(chatId: String) {
+        if (chatId.isBlank()) return
+
+        val myUid = requireUid()
+
+        try {
+            // Получаем все непрочитанные сообщения от других пользователей
+            val unreadMessages = db.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .whereNotEqualTo("senderId", myUid)
+                .whereIn("status", listOf("SENT", "DELIVERED"))
+                .get()
+                .await()
+
+            if (unreadMessages.documents.isEmpty()) {
+                Log.d("ChatRepository", "No unread messages to mark")
+                return
+            }
+
+            // Обновляем статус батчем
+            val batch = db.batch()
+            var count = 0
+
+            unreadMessages.documents.forEach { doc ->
+                val messageRef = db.collection("chats")
+                    .document(chatId)
+                    .collection("messages")
+                    .document(doc.id)
+
+                batch.update(messageRef, mapOf(
+                    "status" to MessageStatus.READ.name,
+                    "readAt" to FieldValue.serverTimestamp()
+                ))
+                count++
+
+                // Firebase batch ограничен 500 операциями
+                if (count >= 500) {
+                    batch.commit().await()
+                    count = 0
+                }
+            }
+
+            if (count > 0) {
+                batch.commit().await()
+            }
+
+            // Обнуляем счетчик непрочитанных
+            db.collection("chats")
+                .document(chatId)
+                .update("unreadCount.$myUid", 0)
+                .await()
+
+            Log.d("ChatRepository", "Marked ${unreadMessages.size()} messages as READ")
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error marking messages as read", e)
+            throw e
+        }
     }
 
     /**
@@ -39,54 +114,69 @@ class ChatRepository(
     suspend fun getOrCreateChat(otherUserId: String): String {
         val myUid = requireUid()
 
-        // Ищем существующий чат
-        val existingChats = db.collection("chats")
-            .whereArrayContains("participants", myUid)
-            .get()
-            .await()
+        try {
+            // Ищем существующий чат
+            val existingChats = db.collection("chats")
+                .whereArrayContains("participants", myUid)
+                .get()
+                .await()
 
-        val existingChat = existingChats.documents.find { doc ->
-            val participants = doc.get("participants") as? List<*> ?: emptyList<Any>()
-            participants.contains(otherUserId) && participants.size == 2
-        }
-
-        if (existingChat != null) {
-            // Проверяем, не удален ли чат для текущего пользователя
-            val deletedFor = existingChat.get("deletedFor") as? List<*> ?: emptyList<Any>()
-            if (deletedFor.contains(myUid)) {
-                db.collection("chats").document(existingChat.id)
-                    .update("deletedFor", FieldValue.arrayRemove(myUid))
-                    .await()
+            val existingChat = existingChats.documents.find { doc ->
+                val participants = doc.get("participants") as? List<*> ?: emptyList<Any>()
+                participants.contains(otherUserId) && participants.size == 2
             }
-            return existingChat.id
+
+            if (existingChat != null) {
+                val chatId = existingChat.id
+                // Проверяем, не удален ли чат для текущего пользователя
+                val deletedFor = existingChat.get("deletedFor") as? List<*> ?: emptyList<Any>()
+                if (deletedFor.contains(myUid)) {
+                    db.collection("chats").document(chatId)
+                        .update("deletedFor", FieldValue.arrayRemove(myUid))
+                        .await()
+                }
+
+                Log.d("ChatRepository", "Found existing chat: $chatId")
+                return chatId
+            }
+
+            // Создаем новый чат
+            val myProfile = db.collection("users").document(myUid).get().await()
+            val otherProfile = db.collection("users").document(otherUserId).get().await()
+
+            val myName = myProfile.getString("username")
+                ?: myProfile.getString("name")
+                ?: "User"
+            val otherName = otherProfile.getString("username")
+                ?: otherProfile.getString("name")
+                ?: "User"
+
+            val myPhoto = myProfile.getString("photoUrl")
+            val otherPhoto = otherProfile.getString("photoUrl")
+
+            val chatData = hashMapOf(
+                "participants" to listOf(myUid, otherUserId),
+                "participantNames" to mapOf(myUid to myName, otherUserId to otherName),
+                "participantPhotos" to mapOf(myUid to myPhoto, otherUserId to otherPhoto),
+                "lastMessage" to "",
+                "lastMessageTime" to FieldValue.serverTimestamp(),
+                "lastMessageSenderId" to "",
+                "unreadCount" to mapOf(myUid to 0, otherUserId to 0),
+                "typingUsers" to emptyList<String>(),
+                "deletedFor" to emptyList<String>(),
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+
+            val newChat = db.collection("chats").add(chatData).await()
+            val newChatId = newChat.id
+
+            Log.d("ChatRepository", "Created new chat: $newChatId")
+            return newChatId
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error in getOrCreateChat", e)
+            throw e
         }
-
-        // Создаем новый чат
-        val myProfile = db.collection("users").document(myUid).get().await()
-        val otherProfile = db.collection("users").document(otherUserId).get().await()
-
-        val myName = myProfile.getString("username") ?: myProfile.getString("name") ?: "User"
-        val otherName = otherProfile.getString("username") ?: otherProfile.getString("name") ?: "User"
-
-        val myPhoto = myProfile.getString("photoUrl")
-        val otherPhoto = otherProfile.getString("photoUrl")
-
-        val chatData = hashMapOf(
-            "participants" to listOf(myUid, otherUserId),
-            "participantNames" to mapOf(myUid to myName, otherUserId to otherName),
-            "participantPhotos" to mapOf(myUid to myPhoto, otherUserId to otherPhoto),
-            "lastMessage" to "",
-            "lastMessageTime" to FieldValue.serverTimestamp(),
-            "lastMessageSenderId" to "",
-            "unreadCount" to mapOf(myUid to 0, otherUserId to 0),
-            "typingUsers" to emptyList<String>(),
-            "deletedFor" to emptyList<String>(),
-            "createdAt" to FieldValue.serverTimestamp(),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
-
-        val newChat = db.collection("chats").add(chatData).await()
-        return newChat.id
     }
 
     /**
@@ -300,35 +390,6 @@ class ChatRepository(
 
         updateChatLastMessage(chatId, "Стикер", myUid)
         return messageId
-    }
-
-    /**
-     * УЛУЧШЕНО: Пометить сообщения как прочитанные
-     */
-    suspend fun markMessagesAsRead(chatId: String, messageIds: List<String>) {
-        if (chatId.isBlank() || messageIds.isEmpty()) return
-
-        val myUid = requireUid()
-
-        // Обновляем статус сообщений
-        val batch = db.batch()
-        messageIds.forEach { messageId ->
-            val messageRef = db.collection("chats")
-                .document(chatId)
-                .collection("messages")
-                .document(messageId)
-            batch.update(messageRef, mapOf(
-                "status" to MessageStatus.READ.name,
-                "readAt" to FieldValue.serverTimestamp()
-            ))
-        }
-        batch.commit().await()
-
-        // Обнуляем счетчик непрочитанных
-        db.collection("chats")
-            .document(chatId)
-            .update("unreadCount.$myUid", 0)
-            .await()
     }
 
     /**

@@ -14,7 +14,7 @@ type DeviceDoc = {
 };
 
 /**
- * ОТПРАВКА ВЫЗОВА
+ * ОТПРАВКА ВЫЗОВА (без изменений)
  */
 export const sendCallNotification = onCall(async (request) => {
   const { toUserId, fromUsername, callId, callType } = request.data || {};
@@ -97,7 +97,7 @@ export const sendCallNotification = onCall(async (request) => {
 });
 
 /**
- * ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ
+ * ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ (без изменений)
  */
 export const hangupOtherDevices = onCall(async (request) => {
   const { callId, acceptedToken } = request.data || {};
@@ -182,10 +182,9 @@ export const hangupOtherDevices = onCall(async (request) => {
 });
 
 /**
- * УЛУЧШЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
- * - Проверяет активный чат получателя
- * - Отправляет только если сообщение не прочитано
- * - Красивое уведомление с текстом
+ * ИСПРАВЛЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
+ * - Проверяет activeChat получателя
+ * - НЕ обновляет статус сообщения (это делает клиент)
  */
 export const sendMessageNotification = onDocumentCreated(
   "chats/{chatId}/messages/{messageId}",
@@ -193,19 +192,21 @@ export const sendMessageNotification = onDocumentCreated(
     const message = event.data?.data();
     if (!message) return;
 
-    const { chatId } = event.params;
+    const { chatId, messageId } = event.params;
     const senderId = message.senderId;
     const senderName = message.senderName || "Пользователь";
     const messageType = message.type || "TEXT";
     const messageStatus = message.status || "SENT";
 
+    console.log(`[sendMessageNotification] New message ${messageId} from ${senderId} in chat ${chatId}`);
+
     // Не отправляем уведомление если сообщение уже прочитано
     if (messageStatus === "READ") {
-      console.log("[sendMessageNotification] Message already read, skipping notification");
+      console.log("[sendMessageNotification] Message already READ, skipping");
       return;
     }
 
-    // Форматируем контент в зависимости от типа
+    // Форматируем контент
     const contentMap: Record<string, string> = {
       TEXT: message.content || "Сообщение",
       IMAGE: "📷 Фото",
@@ -216,17 +217,13 @@ export const sendMessageNotification = onDocumentCreated(
     };
 
     const content = contentMap[String(messageType)] || "Сообщение";
-
-    // Для текстовых сообщений используем реальный текст (ограничиваем длину)
     const notificationBody = messageType === "TEXT"
       ? String(message.content || "").substring(0, 100)
       : content;
 
-    console.log(`[sendMessageNotification] Message from ${senderId} in chat ${chatId}`);
-
     const db = getFirestore();
 
-    // Получаем информацию о чате
+    // Получаем чат
     const chatDoc = await db.collection("chats").doc(chatId).get();
     if (!chatDoc.exists) {
       console.error("[sendMessageNotification] Chat not found:", chatId);
@@ -235,8 +232,6 @@ export const sendMessageNotification = onDocumentCreated(
 
     const chatData = chatDoc.data();
     const participants = (chatData?.participants || []) as string[];
-
-    // Определяем получателей (все участники кроме отправителя)
     const recipients = participants.filter(p => p !== senderId);
 
     if (recipients.length === 0) {
@@ -244,22 +239,21 @@ export const sendMessageNotification = onDocumentCreated(
       return;
     }
 
-    // Собираем токены с фильтрацией по активному чату
+    // Собираем токены с фильтрацией по activeChat
     const allTokens: string[] = [];
     const tokenToDocRef: Record<string, DocumentReference> = {};
 
     for (const recipientId of recipients) {
-      // Проверяем активный чат получателя
+      // Проверяем activeChat
       const userDoc = await db.collection("users").doc(recipientId).get();
       const activeChat = userDoc.data()?.activeChat;
 
-      // Если получатель уже в этом чате, не отправляем уведомление
       if (activeChat === chatId) {
-        console.log(`[sendMessageNotification] User ${recipientId} is active in chat, skipping notification`);
+        console.log(`[sendMessageNotification] User ${recipientId} is in active chat, skipping`);
         continue;
       }
 
-      // Собираем токены устройств
+      // Собираем токены
       const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
       devicesSnap.docs.forEach((d) => {
         const t = (d.data() as DeviceDoc).token;
@@ -273,11 +267,11 @@ export const sendMessageNotification = onDocumentCreated(
     console.log(`[sendMessageNotification] Sending to ${allTokens.length} devices`);
 
     if (allTokens.length === 0) {
-      console.log("[sendMessageNotification] No tokens to send (all users in active chat)");
+      console.log("[sendMessageNotification] No tokens (all users in active chat)");
       return;
     }
 
-    // Отправляем красивое уведомление
+    // Отправляем уведомление
     const multicast = {
       tokens: allTokens,
       notification: {
@@ -287,7 +281,7 @@ export const sendMessageNotification = onDocumentCreated(
       data: {
         type: "message",
         chatId: String(chatId),
-        messageId: String(event.params.messageId),
+        messageId: String(messageId),
         senderId: String(senderId),
         senderName: String(senderName),
         messageType: String(messageType)
@@ -298,9 +292,9 @@ export const sendMessageNotification = onDocumentCreated(
           channelId: "messages",
           sound: "default",
           priority: "high" as const,
-          color: "#2AABEE", // Telegram blue
+          color: "#2AABEE",
           icon: "ic_notification",
-          tag: chatId, // Группировка уведомлений по чату
+          tag: chatId,
           notificationCount: 1
         }
       },
@@ -314,7 +308,7 @@ export const sendMessageNotification = onDocumentCreated(
               title: senderName,
               body: notificationBody
             },
-            "thread-id": chatId // Группировка уведомлений по чату
+            "thread-id": chatId
           }
         }
       }
@@ -351,8 +345,8 @@ export const sendMessageNotification = onDocumentCreated(
 );
 
 /**
- * НОВОЕ: Автоматическое обновление статуса сообщения на DELIVERED
- * когда оно доставлено получателю
+ * ИСПРАВЛЕНО: Автоматическое обновление статуса на DELIVERED
+ * Срабатывает когда сообщение создано и есть активные устройства
  */
 export const updateMessageDeliveryStatus = onDocumentCreated(
   "chats/{chatId}/messages/{messageId}",
@@ -364,19 +358,22 @@ export const updateMessageDeliveryStatus = onDocumentCreated(
     const senderId = message.senderId;
     const status = message.status;
 
-    // Если статус уже не SENT, ничего не делаем
-    if (status !== "SENT") return;
+    // Только для SENT сообщений
+    if (status !== "SENT") {
+      console.log(`[updateMessageDeliveryStatus] Message ${messageId} status is ${status}, skipping`);
+      return;
+    }
 
     const db = getFirestore();
 
-    // Получаем участников чата
+    // Получаем участников
     const chatDoc = await db.collection("chats").doc(chatId).get();
     if (!chatDoc.exists) return;
 
     const participants = (chatDoc.data()?.participants || []) as string[];
     const recipients = participants.filter(p => p !== senderId);
 
-    // Проверяем, есть ли хотя бы одно активное устройство у получателей
+    // Проверяем активные устройства
     let hasActiveDevice = false;
     for (const recipientId of recipients) {
       const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
@@ -386,18 +383,18 @@ export const updateMessageDeliveryStatus = onDocumentCreated(
       }
     }
 
-    // Обновляем статус на DELIVERED
+    // Обновляем на DELIVERED
     if (hasActiveDevice) {
       await db.collection("chats").doc(chatId).collection("messages").doc(messageId).update({
         status: "DELIVERED"
       });
-      console.log(`[updateMessageDeliveryStatus] Updated message ${messageId} to DELIVERED`);
+      console.log(`[updateMessageDeliveryStatus] Message ${messageId} -> DELIVERED`);
     }
   }
 );
 
 /**
- * Автоматическое завершение звонков по таймауту
+ * Автоматическое завершение звонков по таймауту (без изменений)
  */
 export const autoEndCallOnTimeout = onDocumentUpdated(
   "calls/{callId}",
@@ -452,7 +449,7 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
 );
 
 /**
- * Уведомление о запросе перехода на видео
+ * Уведомление о запросе перехода на видео (без изменений)
  */
 export const notifyVideoUpgrade = onDocumentUpdated(
   "calls/{callId}",

@@ -214,12 +214,14 @@ class MainActivity : ComponentActivity() {
                     CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance())
                 }
 
+
                 fun handleIntent(i: Intent) {
                     val action = i.getStringExtra("action")
                     val callId = i.getStringExtra("callId")
                     val type = i.getStringExtra("type") ?: "audio"
                     val fromName = i.getStringExtra("username") ?: ""
                     val isVideoFromIntent = i.getBooleanExtra("isVideo", false)
+                    val role = i.getStringExtra("role") // НОВОЕ: получаем роль
 
                     val deepId = i.getStringExtra("deeplink_callId")
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
@@ -240,16 +242,16 @@ class MainActivity : ComponentActivity() {
                                 return
                             }
 
-                            CallService.start(
-                                ctx = this,
-                                callId = callId,
-                                username = fromName,
-                                isVideo = isVideo,
-                                openUi = false,
-                                playRingback = false
-                            )
+                            // ИСПРАВЛЕНИЕ: Не запускаем CallService здесь!
+                            // CallScreen сам запустит CallService с правильными параметрами
 
-                            navController.navigate(Routes.callRoute(callId, isVideo, fromName)) {
+                            // ИСПРАВЛЕНИЕ: Навигируем на CallScreen с правильными параметрами
+                            // Для входящего звонка: playRingback = false, role = callee
+                            navController.navigate(
+                                "call/$callId?isVideo=$isVideo&playRingback=false&otherUsername=${
+                                    android.net.Uri.encode(fromName)
+                                }"
+                            ) {
                                 launchSingleTop = true
                             }
                         }

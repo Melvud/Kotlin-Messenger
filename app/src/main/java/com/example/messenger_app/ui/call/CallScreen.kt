@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -63,6 +64,8 @@ import org.webrtc.SurfaceViewRenderer
  * - Диалогом перехода на видео
  * - Анимациями и эффектами
  */
+// ИСПРАВЛЕНИЕ: Замените начало CallScreen функции (до DisposableEffect)
+
 @Composable
 fun CallScreen(
     callId: String,
@@ -72,7 +75,10 @@ fun CallScreen(
     otherUsername: String? = null
 ) {
     val context = LocalContext.current
+
     val role = remember(playRingback) { if (playRingback) "caller" else "callee" }
+
+    Log.d("CallScreen", "Initialized: callId=$callId, isVideo=$isVideo, role=$role, playRingback=$playRingback")
 
     // WebRTC состояния
     val isMuted by WebRtcCallManager.isMuted.collectAsState()
@@ -91,21 +97,18 @@ fun CallScreen(
         NotificationHelper.cancelIncomingCall(context, callId)
     }
 
-    // УДАЛЕНО: Дублирующий вызов CallService
-    // LaunchedEffect(callId, isVideo, otherUsername, playRingback) { ... }
-
     val db = remember { FirebaseFirestore.getInstance() }
     val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
     val scope = rememberCoroutineScope()
 
-    // --- ИСПРАВЛЕНИЕ: ИНИЦИАЛИЗАЦИЯ WebRTC ПЕРЕМЕЩЕНА СЮДА ---
-    // Это гарантирует, что `startCall` вызовется *ДО* того,
-    // как `DisposableEffect` (Firestore listener) попытается вызвать `applyRemoteOffer`.
-    LaunchedEffect(callId, isVideo, role) {
+    // ИСПРАВЛЕНИЕ: ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ WebRTC
+    LaunchedEffect(callId, isVideo, role, playRingback) {
+        Log.d("CallScreen", "Starting WebRTC: callId=$callId, isVideo=$isVideo, role=$role")
+
         WebRtcCallManager.init(context)
 
-        // playRingback должен быть true только для вызывающего (caller).
-        val shouldPlayRingback = role == "caller"
+        // ВАЖНО: playRingback только для caller
+        val shouldPlayRingback = (role == "caller" && playRingback)
 
         WebRtcCallManager.startCall(
             callId = callId,
@@ -114,8 +117,7 @@ fun CallScreen(
             role = role
         )
 
-        // Запускаем foreground сервис.
-        // ИСПРАВЛЕНИЕ: Убран параметр `initializeConnection`
+        // Запускаем foreground сервис
         CallService.start(
             ctx = context,
             callId = callId,
@@ -124,8 +126,9 @@ fun CallScreen(
             openUi = false,
             playRingback = shouldPlayRingback
         )
-    }
 
+        Log.d("CallScreen", "WebRTC started successfully")
+    }
 
     // SignalingDelegate
     DisposableEffect(callId, role) {
