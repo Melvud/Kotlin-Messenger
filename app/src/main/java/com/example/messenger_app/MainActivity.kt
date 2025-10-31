@@ -201,7 +201,20 @@ class MainActivity : ComponentActivity() {
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
                     val deepUser = i.getStringExtra("deeplink_username") ?: ""
 
+                    // НОВОЕ: Обработка открытия чата из уведомления о сообщении
+                    val openChat = action == "open_chat"
+                    val chatIdToOpen = i.getStringExtra("chatId")
+                    val otherUserIdToOpen = i.getStringExtra("otherUserId")
+                    val otherUserNameToOpen = i.getStringExtra("otherUserName")
+
                     when {
+                        openChat && !chatIdToOpen.isNullOrBlank() && !otherUserIdToOpen.isNullOrBlank() -> {
+                            // Открываем чат из уведомления
+                            val userName = otherUserNameToOpen ?: "User"
+                            navController.navigate(Routes.chatRoute(chatIdToOpen, otherUserIdToOpen, userName)) {
+                                launchSingleTop = true
+                            }
+                        }
                         !callId.isNullOrBlank() && !action.isNullOrBlank() -> {
                             when (action) {
                                 "accept" -> {

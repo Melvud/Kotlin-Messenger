@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -40,17 +43,16 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * ЭКРАН ЧАТА С КНОПКАМИ ЗВОНКОВ
- * Чат создается только при отправке первого сообщения (как в Telegram)
+ * ЭКРАН ЧАТА С СОВРЕМЕННЫМ ДИЗАЙНОМ В СТИЛЕ TELEGRAM
  */
 @Composable
 fun ChatScreen(
-    chatId: String?,           // null если чат еще не создан
-    otherUserId: String,       // UID собеседника
-    otherUserName: String,     // Имя собеседника
+    chatId: String?,
+    otherUserId: String,
+    otherUserName: String,
     onBack: () -> Unit,
-    onAudioCall: (String) -> Unit,  // callId
-    onVideoCall: (String) -> Unit   // callId
+    onAudioCall: (String) -> Unit,
+    onVideoCall: (String) -> Unit
 ) {
     val context = LocalContext.current
     val auth = remember { FirebaseAuth.getInstance() }
@@ -59,14 +61,10 @@ fun ChatScreen(
     val chatRepo = remember { ChatRepository(auth, db, storage) }
     val callsRepo = remember { CallsRepository(auth, db) }
 
-    // Реальный ID чата (может измениться при первом сообщении)
     var actualChatId by remember { mutableStateOf(chatId) }
-
     val messages by chatRepo.getMessagesFlow(actualChatId ?: "").collectAsState(initial = emptyList())
     val chat by produceState<Chat?>(initialValue = null, actualChatId) {
-        actualChatId?.let { id ->
-            value = chatRepo.getChat(id)
-        }
+        actualChatId?.let { id -> value = chatRepo.getChat(id) }
     }
 
     val myUid = auth.currentUser?.uid ?: ""
@@ -81,14 +79,12 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    // Автоматическая прокрутка к последнему сообщению
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
     }
 
-    // Пометить сообщения как прочитанные
     LaunchedEffect(messages, actualChatId) {
         if (actualChatId != null) {
             val unreadMessages = messages
@@ -100,7 +96,6 @@ fun ChatScreen(
         }
     }
 
-    // Индикатор печати
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
     LaunchedEffect(messageText, actualChatId) {
         typingJob?.cancel()
@@ -115,7 +110,6 @@ fun ChatScreen(
         }
     }
 
-    // Лаунчеры для медиафайлов
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -190,49 +184,56 @@ fun ChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // Аватар собеседника
-                        Box(
-                            modifier = Modifier.size(40.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (otherUserPhoto != null) {
-                                Image(
-                                    painter = rememberAsyncImagePainter(otherUserPhoto),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape),
-                                    contentScale = ContentScale.Crop
+                        if (otherUserPhoto != null) {
+                            Image(
+                                painter = rememberAsyncImagePainter(otherUserPhoto),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .shadow(2.dp, CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .shadow(2.dp, CircleShape)
+                                    .background(
+                                        Brush.linearGradient(
+                                            colors = listOf(
+                                                MaterialTheme.colorScheme.primary,
+                                                MaterialTheme.colorScheme.tertiary
+                                            )
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = otherUserName.firstOrNull()?.uppercase() ?: "?",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
                                 )
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primaryContainer),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = otherUserName.firstOrNull()?.uppercase() ?: "?",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
                             }
                         }
 
                         Column {
                             Text(
                                 text = otherUserName,
-                                fontWeight = FontWeight.Medium,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 17.sp,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                color = Color.White
                             )
-                            if (isOtherUserTyping) {
+                            AnimatedVisibility(visible = isOtherUserTyping) {
                                 Text(
                                     text = "печатает...",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    fontWeight = FontWeight.Medium
                                 )
                             }
                         }
@@ -240,52 +241,45 @@ fun ChatScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
-                    actionIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = Color.White,
+                    actionIconContentColor = Color.White
                 ),
                 actions = {
-                    // Кнопка видеозвонка
                     IconButton(
                         onClick = {
                             scope.launch {
                                 try {
                                     val callInfo = callsRepo.startCall(otherUserId, "video")
                                     onVideoCall(callInfo.id)
-                                } catch (e: Exception) {
-                                    // Обработка ошибки
-                                }
+                                } catch (e: Exception) {}
                             }
                         }
                     ) {
-                        Icon(Icons.Default.Videocam, "Видеозвонок")
+                        Icon(Icons.Default.Videocam, "Видеозвонок", tint = Color.White)
                     }
-                    // Кнопка аудиозвонка
                     IconButton(
                         onClick = {
                             scope.launch {
                                 try {
                                     val callInfo = callsRepo.startCall(otherUserId, "audio")
                                     onAudioCall(callInfo.id)
-                                } catch (e: Exception) {
-                                    // Обработка ошибки
-                                }
+                                } catch (e: Exception) {}
                             }
                         }
                     ) {
-                        Icon(Icons.Default.Call, "Звонок")
+                        Icon(Icons.Default.Call, "Звонок", tint = Color.White)
                     }
                 }
             )
         },
         bottomBar = {
             Column {
-                // Панель ответа на сообщение
                 AnimatedVisibility(
                     visible = replyToMessage != null,
                     enter = expandVertically() + fadeIn(),
@@ -293,29 +287,45 @@ fun ChatScreen(
                 ) {
                     replyToMessage?.let { reply ->
                         Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
                                 modifier = Modifier
-                                    .padding(8.dp)
+                                    .padding(12.dp)
                                     .fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = reply.senderName,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Medium
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(4.dp)
+                                            .height(40.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.primary,
+                                                RoundedCornerShape(2.dp)
+                                            )
                                     )
-                                    Text(
-                                        text = reply.content,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Column {
+                                        Text(
+                                            text = reply.senderName,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = reply.content,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                        )
+                                    }
                                 }
                                 IconButton(onClick = { replyToMessage = null }) {
                                     Icon(Icons.Default.Close, "Отменить")
@@ -325,7 +335,6 @@ fun ChatScreen(
                     }
                 }
 
-                // Панель ввода сообщения
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     tonalElevation = 3.dp
@@ -333,47 +342,46 @@ fun ChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(8.dp),
-                        verticalAlignment = Alignment.Bottom
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Кнопка вложений
-                        IconButton(
-                            onClick = { showAttachMenu = true }
+                        FilledIconButton(
+                            onClick = { showAttachMenu = true },
+                            modifier = Modifier.size(46.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                            )
                         ) {
-                            Icon(Icons.Default.AttachFile, "Вложения")
+                            Icon(Icons.Default.Add, "Вложения")
                         }
 
-                        // Поле ввода
                         OutlinedTextField(
                             value = messageText,
                             onValueChange = { messageText = it },
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 8.dp),
-                            placeholder = { Text("Сообщение") },
+                                .weight(1f),
+                            placeholder = { Text("Сообщение", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) },
                             shape = RoundedCornerShape(24.dp),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color.Transparent,
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                                focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                             ),
                             maxLines = 5,
                             enabled = !isSending
                         )
 
-                        // Кнопка отправки
                         if (messageText.isNotBlank()) {
-                            IconButton(
+                            FilledIconButton(
                                 onClick = {
                                     scope.launch {
                                         isSending = true
                                         try {
-                                            // Создаем чат при первом сообщении
                                             if (actualChatId == null) {
                                                 actualChatId = chatRepo.getOrCreateChat(otherUserId)
                                             }
-
                                             chatRepo.sendTextMessage(
                                                 chatId = actualChatId!!,
                                                 text = messageText,
@@ -388,23 +396,34 @@ fun ChatScreen(
                                         }
                                     }
                                 },
-                                enabled = !isSending
+                                modifier = Modifier.size(46.dp),
+                                enabled = !isSending,
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
+                                )
                             ) {
                                 if (isSending) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(24.dp),
-                                        strokeWidth = 2.dp
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.White
                                     )
                                 } else {
                                     Icon(
                                         Icons.AutoMirrored.Filled.Send,
                                         "Отправить",
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = Color.White
                                     )
                                 }
                             }
                         } else {
-                            IconButton(onClick = { /* Голосовое сообщение */ }) {
+                            FilledIconButton(
+                                onClick = { },
+                                modifier = Modifier.size(46.dp),
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                                )
+                            ) {
                                 Icon(Icons.Default.Mic, "Голосовое")
                             }
                         }
@@ -426,23 +445,50 @@ fun ChatScreen(
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Icon(
-                            Icons.Default.Chat,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                        val infiniteTransition = rememberInfiniteTransition(label = "empty")
+                        val scale by infiniteTransition.animateFloat(
+                            initialValue = 1f,
+                            targetValue = 1.15f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(1200, easing = FastOutSlowInEasing),
+                                repeatMode = RepeatMode.Reverse
+                            ),
+                            label = "scale"
                         )
+
+                        Box(
+                            modifier = Modifier
+                                .size(100.dp)
+                                .background(
+                                    Brush.radialGradient(
+                                        colors = listOf(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                            Color.Transparent
+                                        )
+                                    ),
+                                    shape = CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Chat,
+                                contentDescription = null,
+                                modifier = Modifier.size(50.dp * scale),
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                            )
+                        }
                         Text(
                             "Нет сообщений",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
                         Text(
                             "Начните общение с ${otherUserName}!",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
                     }
                 }
@@ -450,10 +496,10 @@ fun ChatScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(vertical = 8.dp)
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 8.dp)
                 ) {
                     items(messages, key = { it.id }) { message ->
-                        MessageBubble(
+                        ModernMessageBubble(
                             message = message,
                             isMyMessage = message.senderId == myUid,
                             onLongClick = { replyToMessage = message }
@@ -463,9 +509,8 @@ fun ChatScreen(
             }
         }
 
-        // Меню вложений
         if (showAttachMenu) {
-            AttachmentMenu(
+            ModernAttachmentMenu(
                 onDismiss = { showAttachMenu = false },
                 onImageClick = {
                     showAttachMenu = false
@@ -486,7 +531,7 @@ fun ChatScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(
+private fun ModernMessageBubble(
     message: Message,
     isMyMessage: Boolean,
     onLongClick: () -> Unit
@@ -494,23 +539,24 @@ private fun MessageBubble(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+            .padding(vertical = 3.dp),
         horizontalArrangement = if (isMyMessage) Arrangement.End else Arrangement.Start
     ) {
         Surface(
             shape = RoundedCornerShape(
-                topStart = 18.dp,
-                topEnd = 18.dp,
-                bottomStart = if (isMyMessage) 18.dp else 4.dp,
-                bottomEnd = if (isMyMessage) 4.dp else 18.dp
+                topStart = 20.dp,
+                topEnd = 20.dp,
+                bottomStart = if (isMyMessage) 20.dp else 6.dp,
+                bottomEnd = if (isMyMessage) 6.dp else 20.dp
             ),
             color = if (isMyMessage) {
                 MaterialTheme.colorScheme.primaryContainer
             } else {
                 MaterialTheme.colorScheme.surfaceVariant
             },
+            shadowElevation = 1.dp,
             modifier = Modifier
-                .widthIn(max = 300.dp)
+                .widthIn(max = 280.dp)
                 .combinedClickable(
                     onClick = {},
                     onLongClick = onLongClick
@@ -519,40 +565,55 @@ private fun MessageBubble(
             Column(
                 modifier = Modifier.padding(12.dp)
             ) {
-                // Если есть ответ на сообщение
                 if (message.replyToId != null && message.replyToText != null) {
                     Surface(
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.3f),
-                        shape = RoundedCornerShape(8.dp),
+                        color = if (isMyMessage)
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                        else
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 8.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(8.dp)
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                text = message.senderName,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Medium
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(36.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(1.5.dp)
+                                    )
                             )
-                            Text(
-                                text = message.replyToText,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Column {
+                                Text(
+                                    text = message.senderName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = message.replyToText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                            }
                         }
                     }
                 }
 
-                // Содержимое сообщения
                 when (message.type) {
                     MessageType.TEXT -> {
                         Text(
                             text = message.content,
-                            style = MaterialTheme.typography.bodyMedium
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                     MessageType.IMAGE -> {
@@ -560,9 +621,9 @@ private fun MessageBubble(
                             painter = rememberAsyncImagePainter(message.content),
                             contentDescription = null,
                             modifier = Modifier
-                                .widthIn(max = 250.dp)
-                                .heightIn(max = 300.dp)
-                                .clip(RoundedCornerShape(12.dp)),
+                                .widthIn(max = 240.dp)
+                                .heightIn(max = 320.dp)
+                                .clip(RoundedCornerShape(14.dp)),
                             contentScale = ContentScale.Fit
                         )
                     }
@@ -573,9 +634,9 @@ private fun MessageBubble(
                                     painter = rememberAsyncImagePainter(message.thumbnailUrl),
                                     contentDescription = null,
                                     modifier = Modifier
-                                        .widthIn(max = 250.dp)
-                                        .heightIn(max = 300.dp)
-                                        .clip(RoundedCornerShape(12.dp)),
+                                        .widthIn(max = 240.dp)
+                                        .heightIn(max = 320.dp)
+                                        .clip(RoundedCornerShape(14.dp)),
                                     contentScale = ContentScale.Fit
                                 )
                             }
@@ -583,29 +644,41 @@ private fun MessageBubble(
                                 Icons.Default.PlayCircle,
                                 contentDescription = null,
                                 modifier = Modifier
-                                    .size(48.dp)
+                                    .size(56.dp)
                                     .align(Alignment.Center),
-                                tint = Color.White
+                                tint = Color.White.copy(alpha = 0.9f)
                             )
                         }
                     }
                     MessageType.FILE -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
                         ) {
-                            Icon(Icons.Default.InsertDriveFile, null)
-                            Column {
-                                Text(
-                                    text = message.fileName ?: "Файл",
-                                    style = MaterialTheme.typography.bodyMedium
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.InsertDriveFile,
+                                    null,
+                                    modifier = Modifier.size(32.dp),
+                                    tint = MaterialTheme.colorScheme.primary
                                 )
-                                message.fileSize?.let { size ->
+                                Column {
                                     Text(
-                                        text = formatFileSize(size),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        text = message.fileName ?: "Файл",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium
                                     )
+                                    message.fileSize?.let { size ->
+                                        Text(
+                                            text = formatFileSize(size),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -614,19 +687,18 @@ private fun MessageBubble(
                         Image(
                             painter = rememberAsyncImagePainter(message.content),
                             contentDescription = null,
-                            modifier = Modifier.size(150.dp)
+                            modifier = Modifier.size(160.dp)
                         )
                     }
                     else -> {
                         Text(
-                            text = "Неподдерживаемый тип сообщения",
+                            text = "Неподдерживаемый тип",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
                     }
                 }
 
-                // Время и статус
                 Row(
                     modifier = Modifier
                         .align(Alignment.End)
@@ -636,7 +708,7 @@ private fun MessageBubble(
                 ) {
                     if (message.isEdited) {
                         Text(
-                            text = "изменено",
+                            text = "изм.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
@@ -673,7 +745,7 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun AttachmentMenu(
+private fun ModernAttachmentMenu(
     onDismiss: () -> Unit,
     onImageClick: () -> Unit,
     onVideoClick: () -> Unit,
@@ -681,24 +753,27 @@ private fun AttachmentMenu(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Отправить") },
+        title = { Text("Отправить файл", fontWeight = FontWeight.Bold) },
         text = {
             Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AttachmentOption(
+                ModernAttachmentOption(
                     icon = Icons.Default.Image,
-                    text = "Фото",
+                    text = "Фото или изображение",
+                    color = MaterialTheme.colorScheme.primary,
                     onClick = onImageClick
                 )
-                AttachmentOption(
+                ModernAttachmentOption(
                     icon = Icons.Default.Videocam,
                     text = "Видео",
+                    color = MaterialTheme.colorScheme.tertiary,
                     onClick = onVideoClick
                 )
-                AttachmentOption(
+                ModernAttachmentOption(
                     icon = Icons.Default.InsertDriveFile,
-                    text = "Файл",
+                    text = "Файл или документ",
+                    color = MaterialTheme.colorScheme.secondary,
                     onClick = onFileClick
                 )
             }
@@ -712,15 +787,16 @@ private fun AttachmentMenu(
 }
 
 @Composable
-private fun AttachmentOption(
+private fun ModernAttachmentOption(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     text: String,
+    color: Color,
     onClick: () -> Unit
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(16.dp),
+        color = color.copy(alpha = 0.1f),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -728,8 +804,25 @@ private fun AttachmentOption(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-            Text(text, style = MaterialTheme.typography.bodyLarge)
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    icon,
+                    null,
+                    tint = color,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }

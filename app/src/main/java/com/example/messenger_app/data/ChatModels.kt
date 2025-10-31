@@ -84,7 +84,7 @@ fun DocumentSnapshot.toMessage(): Message? {
     return try {
         val typeStr = getString("type") ?: "TEXT"
         val statusStr = getString("status") ?: "SENT"
-        
+
         Message(
             id = id,
             chatId = getString("chatId") ?: "",
@@ -113,6 +113,19 @@ fun DocumentSnapshot.toMessage(): Message? {
 
 fun DocumentSnapshot.toChat(): Chat? {
     return try {
+        // ИСПРАВЛЕНО: Безопасно конвертируем unreadCount, так как Firestore возвращает Long
+        val rawUnreadCount = get("unreadCount") as? Map<*, *> ?: emptyMap<String, Any>()
+        val unreadCount = rawUnreadCount.mapNotNull { (key, value) ->
+            val k = key as? String ?: return@mapNotNull null
+            val v = when (value) {
+                is Long -> value.toInt()
+                is Int -> value
+                is Number -> value.toInt()
+                else -> 0
+            }
+            k to v
+        }.toMap()
+
         Chat(
             id = id,
             participants = get("participants") as? List<String> ?: emptyList(),
@@ -121,12 +134,13 @@ fun DocumentSnapshot.toChat(): Chat? {
             lastMessage = getString("lastMessage") ?: "",
             lastMessageTime = getTimestamp("lastMessageTime"),
             lastMessageSenderId = getString("lastMessageSenderId") ?: "",
-            unreadCount = get("unreadCount") as? Map<String, Int> ?: emptyMap(),
+            unreadCount = unreadCount,
             typingUsers = get("typingUsers") as? List<String> ?: emptyList(),
             createdAt = getTimestamp("createdAt"),
             updatedAt = getTimestamp("updatedAt")
         )
     } catch (e: Exception) {
+        android.util.Log.e("ChatModels", "Error converting chat", e)
         null
     }
 }

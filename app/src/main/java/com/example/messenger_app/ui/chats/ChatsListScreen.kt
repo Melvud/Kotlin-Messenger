@@ -1,11 +1,13 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.example.messenger_app.ui.chats
 
 import androidx.compose.animation.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +43,7 @@ import java.util.*
 /**
  * ГЛАВНЫЙ ЭКРАН МЕССЕНДЖЕРА (КАК В TELEGRAM)
  * Объединяет чаты и поиск контактов в одном месте
+ * ДОБАВЛЕНО: Удаление чатов при долгом нажатии
  */
 @Composable
 fun ChatsListScreen(
@@ -60,6 +63,10 @@ fun ChatsListScreen(
     var isSearchActive by remember { mutableStateOf(false) }
     var searchResults by remember { mutableStateOf<List<Contact>>(emptyList()) }
     var showMenu by remember { mutableStateOf(false) }
+
+    // НОВОЕ: Состояние для диалога удаления
+    var chatToDelete by remember { mutableStateOf<Chat?>(null) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     var searchJob by remember { mutableStateOf<Job?>(null) }
@@ -270,6 +277,11 @@ fun ChatsListScreen(
                                     val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
                                     val otherUserName = chat.participantNames[otherUserId] ?: "User"
                                     onChatClick(chat.id, otherUserId, otherUserName)
+                                },
+                                onLongClick = {
+                                    // НОВОЕ: Открываем диалог удаления при долгом нажатии
+                                    chatToDelete = chat
+                                    showDeleteDialog = true
                                 }
                             )
                             Divider(
@@ -281,6 +293,32 @@ fun ChatsListScreen(
                 }
             }
         }
+    }
+
+    // НОВОЕ: Диалог удаления чата
+    if (showDeleteDialog && chatToDelete != null) {
+        DeleteChatDialog(
+            chat = chatToDelete!!,
+            myUid = myUid,
+            onDismiss = {
+                showDeleteDialog = false
+                chatToDelete = null
+            },
+            onDeleteForMe = {
+                scope.launch {
+                    chatRepo.deleteChatForMe(chatToDelete!!.id)
+                    showDeleteDialog = false
+                    chatToDelete = null
+                }
+            },
+            onDeleteForEveryone = {
+                scope.launch {
+                    chatRepo.deleteChat(chatToDelete!!.id)
+                    showDeleteDialog = false
+                    chatToDelete = null
+                }
+            }
+        )
     }
 }
 
@@ -348,7 +386,8 @@ private fun ContactSearchItem(
 private fun ChatListItem(
     chat: Chat,
     myUid: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     // Получаем информацию о собеседнике
     val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
@@ -360,7 +399,10 @@ private fun ChatListItem(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         color = MaterialTheme.colorScheme.surface
     ) {
         Row(
@@ -491,6 +533,79 @@ private fun ChatListItem(
             }
         }
     }
+}
+
+/**
+ * НОВОЕ: Диалог удаления чата
+ */
+@Composable
+private fun DeleteChatDialog(
+    chat: Chat,
+    myUid: String,
+    onDismiss: () -> Unit,
+    onDeleteForMe: () -> Unit,
+    onDeleteForEveryone: () -> Unit
+) {
+    val otherUserId = chat.participants.firstOrNull { it != myUid } ?: ""
+    val otherUserName = chat.participantNames[otherUserId] ?: "User"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = {
+            Text("Удалить чат?")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Чат с $otherUserName")
+                Text(
+                    "Выберите действие:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Удалить для всех
+                Button(
+                    onClick = onDeleteForEveryone,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Icon(Icons.Default.DeleteForever, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Удалить у всех")
+                }
+
+                // Удалить только для меня
+                OutlinedButton(
+                    onClick = onDeleteForMe,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Delete, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Удалить у меня")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
 }
 
 private fun formatTime(date: Date): String {

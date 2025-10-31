@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
@@ -15,7 +15,6 @@ type DeviceDoc = {
 
 /**
  * ОТПРАВКА ВЫЗОВА
- * Ожидает: { toUserId, fromUsername, callId, callType }
  */
 export const sendCallNotification = onCall(async (request) => {
   const { toUserId, fromUsername, callId, callType } = request.data || {};
@@ -99,7 +98,6 @@ export const sendCallNotification = onCall(async (request) => {
 
 /**
  * ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ
- * Ожидает: { callId, acceptedToken }
  */
 export const hangupOtherDevices = onCall(async (request) => {
   const { callId, acceptedToken } = request.data || {};
@@ -165,7 +163,7 @@ export const hangupOtherDevices = onCall(async (request) => {
       console.warn("[hangupOtherDevices] send error:", token, code, msg);
       if (
         code === "messaging/registration-token-not-registered" ||
-        code === "messaging/invalid-registration-token"
+        code === "messaging/invalid-token"
       ) {
         const ref = tokenToDocRef[token];
         if (ref) invalidDocRefs.push(ref);
@@ -184,8 +182,138 @@ export const hangupOtherDevices = onCall(async (request) => {
 });
 
 /**
- * НОВОЕ: Автоматическое завершение звонков по таймауту
- * Триггер: когда звонок обновляется и прошло 30+ секунд с момента создания
+ * НОВОЕ: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
+ * Триггер: когда создается новое сообщение в чате
+ */
+export const sendMessageNotification = onDocumentCreated(
+  "chats/{chatId}/messages/{messageId}",
+  async (event) => {
+    const message = event.data?.data();
+    if (!message) return;
+
+    const { chatId } = event.params;
+    const senderId = message.senderId;
+    const senderName = message.senderName || "Пользователь";
+    const messageType = message.type || "TEXT";
+    let content = message.content || "";
+
+    // Форматируем контент в зависимости от типа
+    if (messageType !== "TEXT") {
+      content = {
+        "IMAGE": "📷 Фото",
+        "VIDEO": "🎥 Видео",
+        "FILE": "📎 Файл",
+        "VOICE": "🎤 Голосовое сообщение",
+        "STICKER": "Стикер"
+      }[messageType] || "Сообщение";
+    }
+
+    console.log(`[sendMessageNotification] Message from ${senderId} in chat ${chatId}`);
+
+    const db = getFirestore();
+
+    // Получаем информацию о чате
+    const chatDoc = await db.collection("chats").doc(chatId).get();
+    if (!chatDoc.exists) {
+      console.error("[sendMessageNotification] Chat not found:", chatId);
+      return;
+    }
+
+    const chatData = chatDoc.data();
+    const participants = (chatData?.participants || []) as string[];
+
+    // Определяем получателей (все участники кроме отправителя)
+    const recipients = participants.filter(p => p !== senderId);
+
+    if (recipients.length === 0) {
+      console.log("[sendMessageNotification] No recipients");
+      return;
+    }
+
+    // Собираем токены всех получателей
+    const allTokens: string[] = [];
+    const tokenToDocRef: Record<string, DocumentReference> = {};
+
+    for (const recipientId of recipients) {
+      const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
+      devicesSnap.docs.forEach((d) => {
+        const t = (d.data() as DeviceDoc).token;
+        if (typeof t === "string" && t.length > 0) {
+          allTokens.push(t);
+          tokenToDocRef[t] = d.ref;
+        }
+      });
+    }
+
+    console.log(`[sendMessageNotification] Sending to ${allTokens.length} devices`);
+
+    if (allTokens.length === 0) return;
+
+    // Отправляем уведомление
+    const multicast = {
+      tokens: allTokens,
+      notification: {
+        title: senderName,
+        body: content.substring(0, 100) // Ограничиваем длину
+      },
+      data: {
+        type: "message",
+        chatId: String(chatId),
+        messageId: String(event.params.messageId),
+        senderId: String(senderId),
+        senderName: String(senderName)
+      },
+      android: {
+        priority: "high" as const,
+        notification: {
+          channelId: "messages",
+          sound: "default",
+          priority: "high" as const
+        }
+      },
+      apns: {
+        headers: { "apns-priority": "10" },
+        payload: {
+          aps: {
+            sound: "default",
+            badge: 1
+          }
+        }
+      }
+    };
+
+    const res = await getMessaging().sendEachForMulticast(multicast);
+    console.log(
+      `[sendMessageNotification] sent: success=${res.successCount}, failure=${res.failureCount}`
+    );
+
+    // Удаляем невалидные токены
+    const invalidDocRefs: DocumentReference[] = [];
+    res.responses.forEach((r, i) => {
+      if (!r.success) {
+        const token = allTokens[i];
+        const code = (r.error && (r.error as any).code) || "unknown";
+        if (
+          code === "messaging/registration-token-not-registered" ||
+          code === "messaging/invalid-registration-token"
+        ) {
+          const ref = tokenToDocRef[token];
+          if (ref) invalidDocRefs.push(ref);
+        }
+      }
+    });
+
+    if (invalidDocRefs.length > 0) {
+      const batch = db.batch();
+      invalidDocRefs.forEach((ref) => batch.delete(ref));
+      await batch.commit();
+      console.log("[sendMessageNotification] Removed invalid device docs:", invalidDocRefs.length);
+    }
+  }
+);
+
+/**
+ * Автоматическое завершение звонков по таймауту
  */
 export const autoEndCallOnTimeout = onDocumentUpdated(
   "calls/{callId}",
@@ -195,12 +323,10 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
 
     if (!after) return;
 
-    // Если звонок уже завершен, ничего не делаем
     if (after.endedAt || after.status === "ended" || after.status === "timeout") {
       return;
     }
 
-    // Проверяем, прошло ли 30 секунд с момента создания
     const createdAt = after.createdAt;
     if (!createdAt || !createdAt.toDate) return;
 
@@ -208,7 +334,6 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
     const created = createdAt.toDate().getTime();
     const elapsed = now - created;
 
-    // Если прошло больше 30 секунд и нет startedAt (звонок не был принят)
     if (elapsed > 30000 && !after.startedAt && !before?.endedAt) {
       console.log(`[autoEndCallOnTimeout] Ending call ${event.params.callId} due to timeout`);
 
@@ -218,7 +343,6 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
         status: "timeout"
       });
 
-      // Отправляем уведомление caller'у о таймауте
       const callerUid = after.callerUid;
       if (callerUid) {
         const devicesSnap = await db.collection("users").doc(String(callerUid)).collection("devices").get();
@@ -244,8 +368,7 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
 );
 
 /**
- * НОВОЕ: Уведомление о запросе перехода на видео
- * Триггер: когда в документе звонка появляется videoUpgradeRequest
+ * Уведомление о запросе перехода на видео
  */
 export const notifyVideoUpgrade = onDocumentUpdated(
   "calls/{callId}",
@@ -255,7 +378,6 @@ export const notifyVideoUpgrade = onDocumentUpdated(
 
     if (!after) return;
 
-    // Проверяем, появился ли новый videoUpgradeRequest
     const hadRequest = before?.videoUpgradeRequest;
     const hasRequest = after.videoUpgradeRequest;
 
@@ -264,11 +386,8 @@ export const notifyVideoUpgrade = onDocumentUpdated(
 
       const db = getFirestore();
 
-      // Определяем, кому отправлять (противоположная сторона от того, кто запросил)
       const callerUid = after.callerUid;
       const calleeUid = after.calleeUid;
-
-      // Предполагаем, что запрос идет от caller к callee (можно улучшить логику)
       const targetUid = calleeUid;
 
       if (targetUid) {
@@ -280,7 +399,6 @@ export const notifyVideoUpgrade = onDocumentUpdated(
         });
 
         if (tokens.length > 0) {
-          // Получаем имя запросившего
           const callerDoc = await db.collection("users").doc(String(callerUid)).get();
           const fromUsername = callerDoc.data()?.username || callerDoc.data()?.name || "Собеседник";
 
