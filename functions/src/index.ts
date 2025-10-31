@@ -195,18 +195,19 @@ export const sendMessageNotification = onDocumentCreated(
     const senderId = message.senderId;
     const senderName = message.senderName || "Пользователь";
     const messageType = message.type || "TEXT";
-    let content = message.content || "";
 
     // Форматируем контент в зависимости от типа
-    if (messageType !== "TEXT") {
-      content = {
-        "IMAGE": "📷 Фото",
-        "VIDEO": "🎥 Видео",
-        "FILE": "📎 Файл",
-        "VOICE": "🎤 Голосовое сообщение",
-        "STICKER": "Стикер"
-      }[messageType] || "Сообщение";
-    }
+    const contentMap: Record<string, string> = {
+      IMAGE: "📷 Фото",
+      VIDEO: "🎬 Видео",
+      FILE:  "📎 Файл",
+      VOICE: "🎤 Голосовое",
+      STICKER: "Стикер",
+    };
+
+    // если messageType у вас может быть any, можно явно привести его к string
+    const content = contentMap[String(messageType)] ?? "Сообщение";
+
 
     console.log(`[sendMessageNotification] Message from ${senderId} in chat ${chatId}`);
 

@@ -15,8 +15,14 @@ import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
 /**
- * РЕПОЗИТОРИЙ ДЛЯ РАБОТЫ С ЧАТАМИ
- * Полная поддержка текстовых сообщений, медиафайлов, стикеров
+ * Репозиторий для работы с чатами.
+ *
+ * ВАЖНО: в проекте должны быть модели и extension-функции:
+ * - data class Chat, Message, MediaUpload и т.п.
+ * - fun DocumentSnapshot.toChat(): Chat?
+ * - fun DocumentSnapshot.toMessage(): Message?
+ *
+ * Эти определения находятся в ChatModels.kt и не должны повторяться здесь.
  */
 class ChatRepository(
     private val auth: FirebaseAuth,
@@ -40,13 +46,13 @@ class ChatRepository(
             .await()
 
         val existingChat = existingChats.documents.find { doc ->
-            val participants = doc.get("participants") as? List<*> ?: emptyList<String>()
+            val participants = doc.get("participants") as? List<*> ?: emptyList<Any>()
             participants.contains(otherUserId) && participants.size == 2
         }
 
         if (existingChat != null) {
             // Проверяем, не удален ли чат для текущего пользователя
-            val deletedFor = existingChat.get("deletedFor") as? List<*> ?: emptyList<String>()
+            val deletedFor = existingChat.get("deletedFor") as? List<*> ?: emptyList<Any>()
             if (deletedFor.contains(myUid)) {
                 // Восстанавливаем чат для пользователя
                 db.collection("chats").document(existingChat.id)
@@ -75,7 +81,7 @@ class ChatRepository(
             "lastMessageSenderId" to "",
             "unreadCount" to mapOf(myUid to 0, otherUserId to 0),
             "typingUsers" to emptyList<String>(),
-            "deletedFor" to emptyList<String>(), // НОВОЕ: список пользователей, удаливших чат
+            "deletedFor" to emptyList<String>(),
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -88,7 +94,13 @@ class ChatRepository(
      * Получить поток всех чатов пользователя
      */
     fun getChatsFlow(): Flow<List<Chat>> = callbackFlow {
-        val myUid = requireUid()
+        val myUid = try {
+            requireUid()
+        } catch (e: Throwable) {
+            trySend(emptyList())
+            close(e)
+            return@callbackFlow
+        }
 
         val registration = db.collection("chats")
             .whereArrayContains("participants", myUid)
@@ -100,15 +112,12 @@ class ChatRepository(
                     return@addSnapshotListener
                 }
 
-                // Фильтруем чаты, которые не удалены для текущего пользователя
                 val chats = snapshot?.documents
-                    ?.mapNotNull { it.toChat() }
-                    ?.filter { chat ->
-                        val deletedFor = db.collection("chats").document(chat.id)
-                            .get().result?.get("deletedFor") as? List<*> ?: emptyList<String>()
-                        !deletedFor.contains(myUid)
-                    }
-                    ?: emptyList()
+                    ?.mapNotNull { doc ->
+                        val chat = doc.toChat() // <-- использует extension из ChatModels.kt
+                        val deletedFor = doc.get("deletedFor") as? List<*> ?: emptyList<Any>()
+                        if (deletedFor.contains(myUid)) null else chat
+                    } ?: emptyList()
 
                 trySend(chats)
             }
@@ -120,6 +129,12 @@ class ChatRepository(
      * Получить поток сообщений чата
      */
     fun getMessagesFlow(chatId: String): Flow<List<Message>> = callbackFlow {
+        if (chatId.isBlank()) {
+            trySend(emptyList())
+            close()
+            return@callbackFlow
+        }
+
         val registration = db.collection("chats")
             .document(chatId)
             .collection("messages")
@@ -171,7 +186,6 @@ class ChatRepository(
             messageData["replyToText"] = replyToText ?: ""
         }
 
-        // Добавляем сообщение
         db.collection("chats")
             .document(chatId)
             .collection("messages")
@@ -179,9 +193,7 @@ class ChatRepository(
             .set(messageData)
             .await()
 
-        // Обновляем последнее сообщение в чате
         updateChatLastMessage(chatId, text, myUid)
-
         return messageId
     }
 
@@ -199,15 +211,13 @@ class ChatRepository(
         val myName = myProfile.getString("username") ?: myProfile.getString("name") ?: "User"
         val myPhoto = myProfile.getString("photoUrl")
 
-        // Загружаем файл в Firebase Storage
         val fileExtension = mediaUpload.fileName.substringAfterLast(".", "")
         val storagePath = "chats/$chatId/${UUID.randomUUID()}.$fileExtension"
         val storageRef = storage.reference.child(storagePath)
 
-        val uploadTask = storageRef.putFile(Uri.parse(mediaUpload.localUri)).await()
+        storageRef.putFile(Uri.parse(mediaUpload.localUri)).await()
         val downloadUrl = storageRef.downloadUrl.await().toString()
 
-        // Создаем сообщение
         val messageId = UUID.randomUUID().toString()
         val messageData = hashMapOf(
             "chatId" to chatId,
@@ -224,7 +234,7 @@ class ChatRepository(
             "timestamp" to FieldValue.serverTimestamp()
         )
 
-        if (caption != null && caption.isNotBlank()) {
+        if (!caption.isNullOrBlank()) {
             messageData["caption"] = caption
         }
 
@@ -235,7 +245,6 @@ class ChatRepository(
             .set(messageData)
             .await()
 
-        // Обновляем последнее сообщение
         val lastMessageText = when (mediaUpload.type) {
             MessageType.IMAGE -> "📷 Фото"
             MessageType.VIDEO -> "🎥 Видео"
@@ -245,7 +254,6 @@ class ChatRepository(
             else -> "Медиафайл"
         }
         updateChatLastMessage(chatId, lastMessageText, myUid)
-
         return messageId
     }
 
@@ -280,7 +288,6 @@ class ChatRepository(
             .await()
 
         updateChatLastMessage(chatId, "Стикер", myUid)
-
         return messageId
     }
 
@@ -289,7 +296,6 @@ class ChatRepository(
      */
     suspend fun markMessagesAsRead(chatId: String, messageIds: List<String>) {
         val batch = db.batch()
-
         messageIds.forEach { messageId ->
             val messageRef = db.collection("chats")
                 .document(chatId)
@@ -297,10 +303,8 @@ class ChatRepository(
                 .document(messageId)
             batch.update(messageRef, "status", MessageStatus.READ.name)
         }
-
         batch.commit().await()
 
-        // Обнуляем счетчик непрочитанных для текущего пользователя
         val myUid = requireUid()
         db.collection("chats")
             .document(chatId)
@@ -342,15 +346,12 @@ class ChatRepository(
      */
     suspend fun setTyping(chatId: String, isTyping: Boolean) {
         val myUid = requireUid()
-
         if (isTyping) {
-            db.collection("chats")
-                .document(chatId)
+            db.collection("chats").document(chatId)
                 .update("typingUsers", FieldValue.arrayUnion(myUid))
                 .await()
         } else {
-            db.collection("chats")
-                .document(chatId)
+            db.collection("chats").document(chatId)
                 .update("typingUsers", FieldValue.arrayRemove(myUid))
                 .await()
         }
@@ -372,7 +373,6 @@ class ChatRepository(
             )
             .await()
 
-        // Увеличиваем счетчик непрочитанных для других участников
         val chat = db.collection("chats").document(chatId).get().await()
         val participants = chat.get("participants") as? List<String> ?: emptyList()
         val otherParticipants = participants.filter { it != senderId }
@@ -394,52 +394,39 @@ class ChatRepository(
     }
 
     /**
-     * НОВОЕ: Удалить чат только для себя (скрыть из списка)
+     * Удалить чат только для себя (скрыть)
      */
     suspend fun deleteChatForMe(chatId: String) {
         val myUid = requireUid()
-
-        // Добавляем пользователя в список deletedFor
-        db.collection("chats")
-            .document(chatId)
+        db.collection("chats").document(chatId)
             .update("deletedFor", FieldValue.arrayUnion(myUid))
             .await()
-
-        // Обнуляем счетчик непрочитанных
-        db.collection("chats")
-            .document(chatId)
+        db.collection("chats").document(chatId)
             .update("unreadCount.$myUid", 0)
             .await()
     }
 
     /**
-     * УЛУЧШЕНО: Удалить чат для всех
+     * Удалить чат для всех
      */
     suspend fun deleteChat(chatId: String) {
-        // Удаляем все сообщения
-        val messages = db.collection("chats")
-            .document(chatId)
+        val messages = db.collection("chats").document(chatId)
             .collection("messages")
             .get()
             .await()
 
         val batch = db.batch()
-        messages.documents.forEach { doc ->
-            batch.delete(doc.reference)
-        }
+        messages.documents.forEach { doc -> batch.delete(doc.reference) }
         batch.commit().await()
 
-        // Удаляем сам чат
         db.collection("chats").document(chatId).delete().await()
     }
 
     /**
-     * НОВОЕ: Проверить, является ли пользователь создателем чата
+     * Проверить, является ли пользователь создателем чата
      */
     suspend fun isCreator(chatId: String): Boolean {
         val myUid = requireUid()
-        val chat = db.collection("chats").document(chatId).get().await()
-        val createdAt = chat.getTimestamp("createdAt") ?: return false
         val messages = db.collection("chats")
             .document(chatId)
             .collection("messages")
@@ -448,7 +435,6 @@ class ChatRepository(
             .get()
             .await()
 
-        // Создателем считается тот, кто отправил первое сообщение
         val firstMessage = messages.documents.firstOrNull()
         return firstMessage?.getString("senderId") == myUid
     }
