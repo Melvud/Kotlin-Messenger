@@ -47,6 +47,9 @@ data class Message(
     val replyToId: String? = null,      // ID сообщения, на которое отвечают
     val replyToText: String? = null,    // Текст сообщения, на которое отвечают
     val isEdited: Boolean = false,
+    val editedAt: Timestamp? = null,    // НОВОЕ: Время редактирования
+    val readAt: Timestamp? = null,      // НОВОЕ: Время прочтения
+    val deletedFor: List<String> = emptyList(), // НОВОЕ: Список UID удаливших сообщение
     val status: MessageStatus = MessageStatus.SENDING,
     @ServerTimestamp
     val timestamp: Timestamp? = null,
@@ -84,6 +87,8 @@ fun DocumentSnapshot.toMessage(): Message? {
     return try {
         val typeStr = getString("type") ?: "TEXT"
         val statusStr = getString("status") ?: "SENT"
+        val deletedForRaw = get("deletedFor") as? List<*> ?: emptyList<Any>()
+        val deletedFor = deletedForRaw.filterIsInstance<String>()
 
         Message(
             id = id,
@@ -102,6 +107,9 @@ fun DocumentSnapshot.toMessage(): Message? {
             replyToId = getString("replyToId"),
             replyToText = getString("replyToText"),
             isEdited = getBoolean("isEdited") ?: false,
+            editedAt = getTimestamp("editedAt"),
+            readAt = getTimestamp("readAt"),
+            deletedFor = deletedFor,
             status = MessageStatus.valueOf(statusStr),
             timestamp = getTimestamp("timestamp"),
             localTimestamp = getLong("localTimestamp") ?: System.currentTimeMillis()
@@ -113,7 +121,7 @@ fun DocumentSnapshot.toMessage(): Message? {
 
 fun DocumentSnapshot.toChat(): Chat? {
     return try {
-        // ИСПРАВЛЕНО: Безопасно конвертируем unreadCount, так как Firestore возвращает Long
+        // Безопасно конвертируем unreadCount, так как Firestore возвращает Long
         val rawUnreadCount = get("unreadCount") as? Map<*, *> ?: emptyMap<String, Any>()
         val unreadCount = rawUnreadCount.mapNotNull { (key, value) ->
             val k = key as? String ?: return@mapNotNull null

@@ -182,8 +182,10 @@ export const hangupOtherDevices = onCall(async (request) => {
 });
 
 /**
- * НОВОЕ: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
- * Триггер: когда создается новое сообщение в чате
+ * УЛУЧШЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
+ * - Проверяет активный чат получателя
+ * - Отправляет только если сообщение не прочитано
+ * - Красивое уведомление с текстом
  */
 export const sendMessageNotification = onDocumentCreated(
   "chats/{chatId}/messages/{messageId}",
@@ -195,19 +197,30 @@ export const sendMessageNotification = onDocumentCreated(
     const senderId = message.senderId;
     const senderName = message.senderName || "Пользователь";
     const messageType = message.type || "TEXT";
+    const messageStatus = message.status || "SENT";
+
+    // Не отправляем уведомление если сообщение уже прочитано
+    if (messageStatus === "READ") {
+      console.log("[sendMessageNotification] Message already read, skipping notification");
+      return;
+    }
 
     // Форматируем контент в зависимости от типа
     const contentMap: Record<string, string> = {
+      TEXT: message.content || "Сообщение",
       IMAGE: "📷 Фото",
       VIDEO: "🎬 Видео",
-      FILE:  "📎 Файл",
+      FILE: "📎 Файл",
       VOICE: "🎤 Голосовое",
       STICKER: "Стикер",
     };
 
-    // если messageType у вас может быть any, можно явно привести его к string
-    const content = contentMap[String(messageType)] ?? "Сообщение";
+    const content = contentMap[String(messageType)] || "Сообщение";
 
+    // Для текстовых сообщений используем реальный текст (ограничиваем длину)
+    const notificationBody = messageType === "TEXT"
+      ? String(message.content || "").substring(0, 100)
+      : content;
 
     console.log(`[sendMessageNotification] Message from ${senderId} in chat ${chatId}`);
 
@@ -231,11 +244,22 @@ export const sendMessageNotification = onDocumentCreated(
       return;
     }
 
-    // Собираем токены всех получателей
+    // Собираем токены с фильтрацией по активному чату
     const allTokens: string[] = [];
     const tokenToDocRef: Record<string, DocumentReference> = {};
 
     for (const recipientId of recipients) {
+      // Проверяем активный чат получателя
+      const userDoc = await db.collection("users").doc(recipientId).get();
+      const activeChat = userDoc.data()?.activeChat;
+
+      // Если получатель уже в этом чате, не отправляем уведомление
+      if (activeChat === chatId) {
+        console.log(`[sendMessageNotification] User ${recipientId} is active in chat, skipping notification`);
+        continue;
+      }
+
+      // Собираем токены устройств
       const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
       devicesSnap.docs.forEach((d) => {
         const t = (d.data() as DeviceDoc).token;
@@ -248,28 +272,36 @@ export const sendMessageNotification = onDocumentCreated(
 
     console.log(`[sendMessageNotification] Sending to ${allTokens.length} devices`);
 
-    if (allTokens.length === 0) return;
+    if (allTokens.length === 0) {
+      console.log("[sendMessageNotification] No tokens to send (all users in active chat)");
+      return;
+    }
 
-    // Отправляем уведомление
+    // Отправляем красивое уведомление
     const multicast = {
       tokens: allTokens,
       notification: {
         title: senderName,
-        body: content.substring(0, 100) // Ограничиваем длину
+        body: notificationBody
       },
       data: {
         type: "message",
         chatId: String(chatId),
         messageId: String(event.params.messageId),
         senderId: String(senderId),
-        senderName: String(senderName)
+        senderName: String(senderName),
+        messageType: String(messageType)
       },
       android: {
         priority: "high" as const,
         notification: {
           channelId: "messages",
           sound: "default",
-          priority: "high" as const
+          priority: "high" as const,
+          color: "#2AABEE", // Telegram blue
+          icon: "ic_notification",
+          tag: chatId, // Группировка уведомлений по чату
+          notificationCount: 1
         }
       },
       apns: {
@@ -277,7 +309,12 @@ export const sendMessageNotification = onDocumentCreated(
         payload: {
           aps: {
             sound: "default",
-            badge: 1
+            badge: 1,
+            alert: {
+              title: senderName,
+              body: notificationBody
+            },
+            "thread-id": chatId // Группировка уведомлений по чату
           }
         }
       }
@@ -309,6 +346,52 @@ export const sendMessageNotification = onDocumentCreated(
       invalidDocRefs.forEach((ref) => batch.delete(ref));
       await batch.commit();
       console.log("[sendMessageNotification] Removed invalid device docs:", invalidDocRefs.length);
+    }
+  }
+);
+
+/**
+ * НОВОЕ: Автоматическое обновление статуса сообщения на DELIVERED
+ * когда оно доставлено получателю
+ */
+export const updateMessageDeliveryStatus = onDocumentCreated(
+  "chats/{chatId}/messages/{messageId}",
+  async (event) => {
+    const message = event.data?.data();
+    if (!message) return;
+
+    const { chatId, messageId } = event.params;
+    const senderId = message.senderId;
+    const status = message.status;
+
+    // Если статус уже не SENT, ничего не делаем
+    if (status !== "SENT") return;
+
+    const db = getFirestore();
+
+    // Получаем участников чата
+    const chatDoc = await db.collection("chats").doc(chatId).get();
+    if (!chatDoc.exists) return;
+
+    const participants = (chatDoc.data()?.participants || []) as string[];
+    const recipients = participants.filter(p => p !== senderId);
+
+    // Проверяем, есть ли хотя бы одно активное устройство у получателей
+    let hasActiveDevice = false;
+    for (const recipientId of recipients) {
+      const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
+      if (!devicesSnap.empty) {
+        hasActiveDevice = true;
+        break;
+      }
+    }
+
+    // Обновляем статус на DELIVERED
+    if (hasActiveDevice) {
+      await db.collection("chats").doc(chatId).collection("messages").doc(messageId).update({
+        status: "DELIVERED"
+      });
+      console.log(`[updateMessageDeliveryStatus] Updated message ${messageId} to DELIVERED`);
     }
   }
 );

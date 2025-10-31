@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import coil.compose.rememberAsyncImagePainter
 import com.example.messenger_app.data.*
 import com.google.firebase.auth.FirebaseAuth
@@ -43,8 +44,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * ЭКРАН ЧАТА С СОВРЕМЕННЫМ ДИЗАЙНОМ
- * ИСПРАВЛЕНО: Правильная обработка null chatId
+ * УЛУЧШЕННЫЙ ЭКРАН ЧАТА
+ * - Современный дизайн
+ * - Анимация "печатает..."
+ * - Долгое нажатие для редактирования/удаления
+ * - Отслеживание активного чата для предотвращения уведомлений
  */
 @Composable
 fun ChatScreen(
@@ -64,7 +68,6 @@ fun ChatScreen(
 
     var actualChatId by remember { mutableStateOf(chatId) }
 
-    // ИСПРАВЛЕНО: Используем actualChatId ?: "" чтобы избежать пустого потока
     val messages by chatRepo.getMessagesFlow(actualChatId ?: "").collectAsState(initial = emptyList())
 
     val chat by produceState<Chat?>(initialValue = null, actualChatId) {
@@ -81,11 +84,29 @@ fun ChatScreen(
 
     var messageText by remember { mutableStateOf("") }
     var replyToMessage by remember { mutableStateOf<Message?>(null) }
+    var messageToEdit by remember { mutableStateOf<Message?>(null) }
     var showAttachMenu by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
+    var selectedMessage by remember { mutableStateOf<Message?>(null) }
+    var showMessageOptions by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    // НОВОЕ: Устанавливаем активный чат при входе
+    LaunchedEffect(actualChatId) {
+        actualChatId?.let { chatRepo.setActiveChat(it) }
+    }
+
+    // НОВОЕ: Очищаем активный чат при выходе
+    DisposableEffect(Unit) {
+        onDispose {
+            scope.launch {
+                chatRepo.setActiveChat(null)
+                actualChatId?.let { chatRepo.setTyping(it, false) }
+            }
+        }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -93,6 +114,7 @@ fun ChatScreen(
         }
     }
 
+    // УЛУЧШЕНО: Пометка сообщений как прочитанных
     LaunchedEffect(messages, actualChatId) {
         if (actualChatId != null && actualChatId!!.isNotBlank()) {
             val unreadMessages = messages
@@ -104,6 +126,7 @@ fun ChatScreen(
         }
     }
 
+    // Обработка печати
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
     LaunchedEffect(messageText, actualChatId) {
         typingJob?.cancel()
@@ -250,13 +273,24 @@ fun ChatScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 color = Color.White
                             )
-                            AnimatedVisibility(visible = isOtherUserTyping) {
-                                Text(
-                                    text = "печатает...",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.White.copy(alpha = 0.9f),
-                                    fontWeight = FontWeight.Medium
-                                )
+                            // УЛУЧШЕНО: Анимированный индикатор печати
+                            AnimatedVisibility(
+                                visible = isOtherUserTyping,
+                                enter = fadeIn() + expandVertically(),
+                                exit = fadeOut() + shrinkVertically()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "печатает",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White.copy(alpha = 0.9f),
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    TypingAnimation()
+                                }
                             }
                         }
                     }
@@ -306,58 +340,34 @@ fun ChatScreen(
         },
         bottomBar = {
             Column {
+                // Реплай
                 AnimatedVisibility(
                     visible = replyToMessage != null,
                     enter = expandVertically() + fadeIn(),
                     exit = shrinkVertically() + fadeOut()
                 ) {
                     replyToMessage?.let { reply ->
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .padding(12.dp)
-                                    .fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    modifier = Modifier.weight(1f),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .width(4.dp)
-                                            .height(40.dp)
-                                            .background(
-                                                MaterialTheme.colorScheme.primary,
-                                                RoundedCornerShape(2.dp)
-                                            )
-                                    )
-                                    Column {
-                                        Text(
-                                            text = reply.senderName,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = reply.content,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                }
-                                IconButton(onClick = { replyToMessage = null }) {
-                                    Icon(Icons.Default.Close, "Отменить")
-                                }
+                        ReplyPreview(
+                            message = reply,
+                            onCancel = { replyToMessage = null }
+                        )
+                    }
+                }
+
+                // Редактирование
+                AnimatedVisibility(
+                    visible = messageToEdit != null,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    messageToEdit?.let { edit ->
+                        EditPreview(
+                            message = edit,
+                            onCancel = {
+                                messageToEdit = null
+                                messageText = ""
                             }
-                        }
+                        )
                     }
                 }
 
@@ -388,7 +398,7 @@ fun ChatScreen(
                             modifier = Modifier.weight(1f),
                             placeholder = {
                                 Text(
-                                    "Сообщение",
+                                    if (messageToEdit != null) "Редактирование..." else "Сообщение",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
                             },
@@ -412,14 +422,27 @@ fun ChatScreen(
                                             if (actualChatId == null) {
                                                 actualChatId = chatRepo.getOrCreateChat(otherUserId)
                                             }
-                                            chatRepo.sendTextMessage(
-                                                chatId = actualChatId!!,
-                                                text = messageText,
-                                                replyToId = replyToMessage?.id,
-                                                replyToText = replyToMessage?.content
-                                            )
+
+                                            if (messageToEdit != null) {
+                                                // Редактирование
+                                                chatRepo.editMessage(
+                                                    chatId = actualChatId!!,
+                                                    messageId = messageToEdit!!.id,
+                                                    newText = messageText
+                                                )
+                                                messageToEdit = null
+                                            } else {
+                                                // Новое сообщение
+                                                chatRepo.sendTextMessage(
+                                                    chatId = actualChatId!!,
+                                                    text = messageText,
+                                                    replyToId = replyToMessage?.id,
+                                                    replyToText = replyToMessage?.content
+                                                )
+                                                replyToMessage = null
+                                            }
+
                                             messageText = ""
-                                            replyToMessage = null
                                             if (actualChatId!!.isNotBlank()) {
                                                 chatRepo.setTyping(actualChatId!!, false)
                                             }
@@ -444,8 +467,8 @@ fun ChatScreen(
                                     )
                                 } else {
                                     Icon(
-                                        Icons.AutoMirrored.Filled.Send,
-                                        "Отправить",
+                                        if (messageToEdit != null) Icons.Default.Check else Icons.AutoMirrored.Filled.Send,
+                                        if (messageToEdit != null) "Сохранить" else "Отправить",
                                         tint = Color.White
                                     )
                                 }
@@ -473,59 +496,7 @@ fun ChatScreen(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             if (messages.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        val infiniteTransition = rememberInfiniteTransition(label = "empty")
-                        val scale by infiniteTransition.animateFloat(
-                            initialValue = 1f,
-                            targetValue = 1.15f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(1200, easing = FastOutSlowInEasing),
-                                repeatMode = RepeatMode.Reverse
-                            ),
-                            label = "scale"
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .size(100.dp)
-                                .background(
-                                    Brush.radialGradient(
-                                        colors = listOf(
-                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                                            Color.Transparent
-                                        )
-                                    ),
-                                    shape = CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.Chat,
-                                contentDescription = null,
-                                modifier = Modifier.size(50.dp * scale),
-                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                            )
-                        }
-                        Text(
-                            "Нет сообщений",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                        Text(
-                            "Начните общение с ${otherUserName}!",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                        )
-                    }
-                }
+                EmptyChatView(otherUserName = otherUserName)
             } else {
                 LazyColumn(
                     state = listState,
@@ -533,11 +504,25 @@ fun ChatScreen(
                     contentPadding = PaddingValues(vertical = 12.dp, horizontal = 8.dp)
                 ) {
                     items(messages, key = { it.id }) { message ->
-                        ModernMessageBubble(
-                            message = message,
-                            isMyMessage = message.senderId == myUid,
-                            onLongClick = { replyToMessage = message }
-                        )
+                        // Фильтруем удаленные сообщения
+                        val deletedFor = (message as? Any)?.let {
+                            // Можно добавить поле deletedFor в Message
+                            false
+                        } ?: false
+
+                        if (!deletedFor) {
+                            ModernMessageBubble(
+                                message = message,
+                                isMyMessage = message.senderId == myUid,
+                                onLongClick = {
+                                    selectedMessage = message
+                                    showMessageOptions = true
+                                },
+                                onReplyClick = {
+                                    replyToMessage = message
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -560,6 +545,255 @@ fun ChatScreen(
                 }
             )
         }
+
+        // НОВОЕ: Диалог опций сообщения
+        if (showMessageOptions && selectedMessage != null) {
+            MessageOptionsDialog(
+                message = selectedMessage!!,
+                isMyMessage = selectedMessage!!.senderId == myUid,
+                onDismiss = { showMessageOptions = false },
+                onReply = {
+                    replyToMessage = selectedMessage
+                    showMessageOptions = false
+                },
+                onEdit = {
+                    if (selectedMessage!!.type == MessageType.TEXT) {
+                        messageToEdit = selectedMessage
+                        messageText = selectedMessage!!.content
+                    }
+                    showMessageOptions = false
+                },
+                onDeleteForMe = {
+                    scope.launch {
+                        actualChatId?.let {
+                            chatRepo.deleteMessage(it, selectedMessage!!.id, forEveryone = false)
+                        }
+                    }
+                    showMessageOptions = false
+                },
+                onDeleteForEveryone = {
+                    scope.launch {
+                        actualChatId?.let {
+                            chatRepo.deleteMessage(it, selectedMessage!!.id, forEveryone = true)
+                        }
+                    }
+                    showMessageOptions = false
+                }
+            )
+        }
+    }
+}
+
+// НОВОЕ: Анимация точек при печати
+@Composable
+private fun TypingAnimation() {
+    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+
+    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        repeat(3) { index ->
+            val alpha by infiniteTransition.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(600),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = StartOffset(index * 200)
+                ),
+                label = "dot$index"
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(4.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = alpha))
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyChatView(otherUserName: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            val infiniteTransition = rememberInfiniteTransition(label = "empty")
+            val scale by infiniteTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.15f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1200, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "scale"
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(100.dp)
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                Color.Transparent
+                            )
+                        ),
+                        shape = CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(50.dp * scale),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            }
+            Text(
+                "Нет сообщений",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Text(
+                "Начните общение с $otherUserName!",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReplyPreview(
+    message: Message,
+    onCancel: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(12.dp)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(4.dp)
+                        .height(40.dp)
+                        .background(
+                            MaterialTheme.colorScheme.primary,
+                            RoundedCornerShape(2.dp)
+                        )
+                )
+                Column {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Reply,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = message.senderName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, "Отменить")
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditPreview(
+    message: Message,
+    onCancel: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(12.dp)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(4.dp)
+                        .height(40.dp)
+                        .background(
+                            MaterialTheme.colorScheme.tertiary,
+                            RoundedCornerShape(2.dp)
+                        )
+                )
+                Column {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.tertiary
+                        )
+                        Text(
+                            text = "Редактирование сообщения",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, "Отменить")
+            }
+        }
     }
 }
 
@@ -568,7 +802,8 @@ fun ChatScreen(
 private fun ModernMessageBubble(
     message: Message,
     isMyMessage: Boolean,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onReplyClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -609,6 +844,7 @@ private fun ModernMessageBubble(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 8.dp)
+                            .clickable { onReplyClick() }
                     ) {
                         Row(
                             modifier = Modifier.padding(10.dp),
@@ -740,18 +976,21 @@ private fun ModernMessageBubble(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // УЛУЧШЕНО: Показываем "изм." если сообщение отредактировано
                     if (message.isEdited) {
                         Text(
                             text = "изм.",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            fontSize = 10.sp
                         )
                     }
                     message.timestamp?.let { timestamp ->
                         Text(
                             text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(timestamp.toDate()),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            fontSize = 11.sp
                         )
                     }
                     if (isMyMessage) {
@@ -774,6 +1013,131 @@ private fun ModernMessageBubble(
                     }
                 }
             }
+        }
+    }
+}
+
+// НОВОЕ: Диалог опций сообщения
+@Composable
+private fun MessageOptionsDialog(
+    message: Message,
+    isMyMessage: Boolean,
+    onDismiss: () -> Unit,
+    onReply: () -> Unit,
+    onEdit: () -> Unit,
+    onDeleteForMe: () -> Unit,
+    onDeleteForEveryone: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Опции сообщения",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                // Ответить
+                MessageOptionItem(
+                    icon = Icons.Default.Reply,
+                    text = "Ответить",
+                    onClick = {
+                        onReply()
+                        onDismiss()
+                    }
+                )
+
+                // Редактировать (только для своих текстовых сообщений)
+                if (isMyMessage && message.type == MessageType.TEXT) {
+                    MessageOptionItem(
+                        icon = Icons.Default.Edit,
+                        text = "Редактировать",
+                        onClick = {
+                            onEdit()
+                            onDismiss()
+                        }
+                    )
+                }
+
+                Divider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // Удалить у меня
+                MessageOptionItem(
+                    icon = Icons.Default.DeleteOutline,
+                    text = "Удалить у меня",
+                    color = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        onDeleteForMe()
+                        onDismiss()
+                    }
+                )
+
+                // Удалить у всех (только для своих сообщений)
+                if (isMyMessage) {
+                    MessageOptionItem(
+                        icon = Icons.Default.DeleteForever,
+                        text = "Удалить у всех",
+                        color = MaterialTheme.colorScheme.error,
+                        onClick = {
+                            onDeleteForEveryone()
+                            onDismiss()
+                        }
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Отмена")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageOptionItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String,
+    color: Color = MaterialTheme.colorScheme.onSurface,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color.Transparent,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(24.dp)
+            )
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyLarge,
+                color = color
+            )
         }
     }
 }

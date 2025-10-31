@@ -9,6 +9,8 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
+import androidx.core.graphics.drawable.IconCompat
 import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
 import com.google.firebase.messaging.FirebaseMessagingService
@@ -50,23 +52,28 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         )
     }
 
+    /**
+     * УЛУЧШЕНО: Красивое уведомление о сообщении
+     */
     private fun handleMessageNotification(message: RemoteMessage) {
         val data = message.data
         val chatId = data["chatId"] ?: return
         val senderId = data["senderId"] ?: return
         val senderName = data["senderName"] ?: "Пользователь"
+        val messageType = data["messageType"] ?: "TEXT"
 
         // Используем notification payload если есть, иначе из data
         val title = message.notification?.title ?: senderName
         val body = message.notification?.body ?: data["content"] ?: "Новое сообщение"
 
-        Log.d("FCM", "Message notification: chatId=$chatId, sender=$senderName")
+        Log.d("FCM", "Message notification: chatId=$chatId, sender=$senderName, type=$messageType")
 
         showMessageNotification(
             chatId = chatId,
             senderId = senderId,
             senderName = title,
-            messageText = body
+            messageText = body,
+            messageType = messageType
         )
     }
 
@@ -84,15 +91,18 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
     private fun handleVideoUpgradeRequest(data: Map<String, String>) {
         val callId = data["callId"] ?: return
         val fromUsername = data["fromUsername"] ?: "Собеседник"
-        // Это будет обработано WebRtcCallManager через Firestore listener
         Log.d("FCM", "Video upgrade request from $fromUsername for call $callId")
     }
 
+    /**
+     * УЛУЧШЕНО: Показать красивое уведомление о сообщении
+     */
     private fun showMessageNotification(
         chatId: String,
         senderId: String,
         senderName: String,
-        messageText: String
+        messageText: String,
+        messageType: String
     ) {
         ensureMessageChannel()
 
@@ -100,7 +110,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         // Intent для открытия чата
         val intent = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("action", "open_chat")
             putExtra("chatId", chatId)
             putExtra("otherUserId", senderId)
@@ -119,18 +129,66 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
+        // Создаем Person для стиля MessagingStyle
+        val person = Person.Builder()
+            .setName(senderName)
+            .setKey(senderId)
+            .build()
+
+        // Используем MessagingStyle для красивого отображения
+        val messagingStyle = NotificationCompat.MessagingStyle(person)
+            .setConversationTitle(senderName)
+            .addMessage(
+                messageText,
+                System.currentTimeMillis(),
+                person
+            )
+
+        // Определяем эмодзи для разных типов сообщений
+        val largeIcon = when (messageType) {
+            "IMAGE" -> "📷"
+            "VIDEO" -> "🎬"
+            "FILE" -> "📎"
+            "VOICE" -> "🎤"
+            "STICKER" -> "😊"
+            else -> null
+        }
+
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
-            .setSmallIcon(R.drawable.ic_notification) // Убедитесь что этот drawable существует
-            .setContentTitle(senderName)
-            .setContentText(messageText)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setStyle(messagingStyle)
             .setAutoCancel(true)
             .setSound(defaultSoundUri)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setColor(0x2AABEE) // Telegram blue
+            .setGroup(MESSAGES_GROUP)
+            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+
+        // Добавляем большую иконку для специальных типов
+        if (largeIcon != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Можно добавить иконку, если нужно
+        }
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(notificationId, notificationBuilder.build())
+
+        // Создаем summary notification для группировки
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val summaryNotification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setStyle(
+                    NotificationCompat.InboxStyle()
+                        .setBigContentTitle("Новые сообщения")
+                )
+                .setGroup(MESSAGES_GROUP)
+                .setGroupSummary(true)
+                .setAutoCancel(true)
+                .build()
+
+            notificationManager.notify(SUMMARY_ID, summaryNotification)
+        }
     }
 
     private fun ensureMessageChannel() {
@@ -142,6 +200,8 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 description = "Уведомления о новых сообщениях"
                 enableVibration(true)
                 setShowBadge(true)
+                enableLights(true)
+                lightColor = 0x2AABEE // Telegram blue
             }
 
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -151,5 +211,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     companion object {
         private const val CHANNEL_MESSAGES = "messages"
+        private const val MESSAGES_GROUP = "com.example.messenger_app.MESSAGES"
+        private const val SUMMARY_ID = 0
     }
 }

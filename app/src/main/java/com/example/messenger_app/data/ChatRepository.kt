@@ -24,6 +24,16 @@ class ChatRepository(
         ?: error("User not authenticated")
 
     /**
+     * НОВОЕ: Установить активный чат для предотвращения уведомлений
+     */
+    suspend fun setActiveChat(chatId: String?) {
+        val myUid = requireUid()
+        db.collection("users").document(myUid)
+            .update("activeChat", chatId ?: FieldValue.delete())
+            .await()
+    }
+
+    /**
      * Получить или создать чат с пользователем
      */
     suspend fun getOrCreateChat(otherUserId: String): String {
@@ -118,7 +128,6 @@ class ChatRepository(
      * Получить поток сообщений чата
      */
     fun getMessagesFlow(chatId: String): Flow<List<Message>> = callbackFlow {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) {
             trySend(emptyList())
             close()
@@ -152,7 +161,6 @@ class ChatRepository(
         replyToId: String? = null,
         replyToText: String? = null
     ): String {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) {
             throw IllegalArgumentException("chatId cannot be blank")
         }
@@ -201,7 +209,6 @@ class ChatRepository(
         mediaUpload: MediaUpload,
         caption: String? = null
     ): String {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) {
             throw IllegalArgumentException("chatId cannot be blank")
         }
@@ -261,7 +268,6 @@ class ChatRepository(
      * Отправить стикер
      */
     suspend fun sendSticker(chatId: String, stickerUrl: String): String {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) {
             throw IllegalArgumentException("chatId cannot be blank")
         }
@@ -297,23 +303,28 @@ class ChatRepository(
     }
 
     /**
-     * Пометить сообщения как прочитанные
+     * УЛУЧШЕНО: Пометить сообщения как прочитанные
      */
     suspend fun markMessagesAsRead(chatId: String, messageIds: List<String>) {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank() || messageIds.isEmpty()) return
 
+        val myUid = requireUid()
+
+        // Обновляем статус сообщений
         val batch = db.batch()
         messageIds.forEach { messageId ->
             val messageRef = db.collection("chats")
                 .document(chatId)
                 .collection("messages")
                 .document(messageId)
-            batch.update(messageRef, "status", MessageStatus.READ.name)
+            batch.update(messageRef, mapOf(
+                "status" to MessageStatus.READ.name,
+                "readAt" to FieldValue.serverTimestamp()
+            ))
         }
         batch.commit().await()
 
-        val myUid = requireUid()
+        // Обнуляем счетчик непрочитанных
         db.collection("chats")
             .document(chatId)
             .update("unreadCount.$myUid", 0)
@@ -323,23 +334,33 @@ class ChatRepository(
     /**
      * Удалить сообщение
      */
-    suspend fun deleteMessage(chatId: String, messageId: String) {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
+    suspend fun deleteMessage(chatId: String, messageId: String, forEveryone: Boolean) {
         if (chatId.isBlank() || messageId.isBlank()) return
 
-        db.collection("chats")
-            .document(chatId)
-            .collection("messages")
-            .document(messageId)
-            .delete()
-            .await()
+        if (forEveryone) {
+            // Полное удаление
+            db.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .document(messageId)
+                .delete()
+                .await()
+        } else {
+            // Пометить как удаленное только для текущего пользователя
+            val myUid = requireUid()
+            db.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .document(messageId)
+                .update("deletedFor", FieldValue.arrayUnion(myUid))
+                .await()
+        }
     }
 
     /**
-     * Редактировать сообщение
+     * УЛУЧШЕНО: Редактировать сообщение
      */
     suspend fun editMessage(chatId: String, messageId: String, newText: String) {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank() || messageId.isBlank()) return
 
         db.collection("chats")
@@ -349,17 +370,37 @@ class ChatRepository(
             .update(
                 mapOf(
                     "content" to newText,
-                    "isEdited" to true
+                    "isEdited" to true,
+                    "editedAt" to FieldValue.serverTimestamp()
                 )
             )
             .await()
+
+        // Обновляем последнее сообщение в чате, если это было последнее сообщение
+        val chat = getChat(chatId)
+        if (chat != null) {
+            val messages = db.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .orderBy("localTimestamp", Query.Direction.DESCENDING)
+                .limit(1)
+                .get()
+                .await()
+
+            val lastMessage = messages.documents.firstOrNull()
+            if (lastMessage?.id == messageId) {
+                db.collection("chats")
+                    .document(chatId)
+                    .update("lastMessage", newText)
+                    .await()
+            }
+        }
     }
 
     /**
      * Установить статус "печатает"
      */
     suspend fun setTyping(chatId: String, isTyping: Boolean) {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) return
 
         val myUid = requireUid()
@@ -406,7 +447,6 @@ class ChatRepository(
      * Получить информацию о чате
      */
     suspend fun getChat(chatId: String): Chat? {
-        // ИСПРАВЛЕНО: Защита от пустого chatId
         if (chatId.isBlank()) return null
 
         val doc = db.collection("chats").document(chatId).get().await()
