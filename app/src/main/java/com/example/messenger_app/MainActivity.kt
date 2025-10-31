@@ -18,14 +18,17 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navDeepLink
 import com.example.messenger_app.data.CallsRepository
+import com.example.messenger_app.push.CallService
 import com.example.messenger_app.push.FcmTokenManager
 import com.example.messenger_app.push.NotificationHelper
+import com.example.messenger_app.push.OngoingCallStore
 import com.example.messenger_app.ui.auth.AuthScreen
 import com.example.messenger_app.ui.call.CallScreen
 import com.example.messenger_app.ui.chats.ChatScreen
 import com.example.messenger_app.ui.chats.ChatsListScreen
 import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.update.AppUpdateManager
+import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
@@ -123,7 +126,6 @@ class MainActivity : ComponentActivity() {
                             )
                         ) { entry ->
                             val chatIdRaw = entry.arguments?.getString("chatId") ?: "new"
-                            // ИСПРАВЛЕНО: Проверяем на "new" И пустую строку
                             val chatId = if (chatIdRaw == "new" || chatIdRaw.isBlank()) null else chatIdRaw
                             val otherUserId = entry.arguments?.getString("otherUserId") ?: return@composable
                             val otherUserName = entry.arguments?.getString("otherUserName") ?: ""
@@ -192,7 +194,8 @@ class MainActivity : ComponentActivity() {
                     val action = i.getStringExtra("action")
                     val callId = i.getStringExtra("callId")
                     val type = i.getStringExtra("type") ?: "audio"
-                    val fromName = i.getStringExtra("fromUsername") ?: ""
+                    val fromName = i.getStringExtra("username") ?: ""
+                    val isVideoFromIntent = i.getBooleanExtra("isVideo", false)
 
                     val deepId = i.getStringExtra("deeplink_callId")
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
@@ -204,24 +207,36 @@ class MainActivity : ComponentActivity() {
                     val otherUserNameToOpen = i.getStringExtra("otherUserName")
 
                     when {
+                        // НОВОЕ: Обработка принятия звонка из уведомления
+                        action == "accept" && !callId.isNullOrBlank() -> {
+                            val isVideo = isVideoFromIntent || type.equals("video", ignoreCase = true)
+
+                            // Теперь мы в foreground, можем безопасно стартовать CallService
+                            CallService.start(
+                                ctx = this,
+                                callId = callId,
+                                username = fromName,
+                                isVideo = isVideo,
+                                openUi = false,
+                                playRingback = false,
+                                initializeConnection = true
+                            )
+
+                            // Переходим на экран звонка
+                            navController.navigate(Routes.callRoute(callId, isVideo, fromName)) {
+                                launchSingleTop = true
+                            }
+                        }
+
                         openChat && !chatIdToOpen.isNullOrBlank() && !otherUserIdToOpen.isNullOrBlank() -> {
                             val userName = otherUserNameToOpen ?: "User"
                             navController.navigate(Routes.chatRoute(chatIdToOpen, otherUserIdToOpen, userName)) {
                                 launchSingleTop = true
                             }
                         }
+
                         !callId.isNullOrBlank() && !action.isNullOrBlank() -> {
                             when (action) {
-                                "accept" -> {
-                                    NotificationHelper.cancelIncomingCall(applicationContext, callId)
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        runCatching { callsRepo.hangupOtherDevices(callId) }
-                                    }
-                                    val isVideo = type.equals("video", ignoreCase = true)
-                                    navController.navigate(Routes.callRoute(callId, isVideo, fromName)) {
-                                        launchSingleTop = true
-                                    }
-                                }
                                 "decline" -> {
                                     NotificationHelper.cancelIncomingCall(applicationContext, callId)
                                     CoroutineScope(Dispatchers.IO).launch {
@@ -230,11 +245,13 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+
                         !deepId.isNullOrBlank() -> {
                             navController.navigate(Routes.callRoute(deepId, deepIsVideo, deepUser)) {
                                 launchSingleTop = true
                             }
                         }
+
                         else -> {
                             navController.handleDeepLink(i)
                         }

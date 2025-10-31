@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.example.messenger_app.MainActivity
 import com.example.messenger_app.data.CallsRepository
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -13,8 +14,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Обработчик кнопок из уведомлений (Принять/Отклонить/Положить и т.д.).
- * ИСПРАВЛЕНО: При принятии звонка сразу инициализируется соединение
+ * ИСПРАВЛЕНО: Правильная обработка принятия звонка
+ * Сначала открываем Activity, потом уже стартуем сервис
  */
 class CallActionReceiver : BroadcastReceiver() {
 
@@ -30,13 +31,13 @@ class CallActionReceiver : BroadcastReceiver() {
 
         when (action) {
             ACTION_INCOMING_ACCEPT -> {
-                // ИСПРАВЛЕНИЕ 1: Закрываем «входящий» биппер и СРАЗУ стартуем основной сервис звонка
+                // ИСПРАВЛЕНИЕ: Закрываем уведомление
                 NotificationHelper.cancelIncomingCall(ctx, callId)
 
                 // Сохраняем состояние звонка
                 OngoingCallStore.save(ctx, callId, if (isVideo) "video" else "audio", username)
 
-                // Уведомляем другие устройства пользователя о принятии звонка
+                // Уведомляем другие устройства
                 val auth = FirebaseAuth.getInstance()
                 val db = FirebaseFirestore.getInstance()
                 val repo = CallsRepository(auth, db)
@@ -48,24 +49,40 @@ class CallActionReceiver : BroadcastReceiver() {
                     }
                 }
 
-                // Стартуем foreground сервис с открытием UI И инициализацией соединения
-                CallService.start(
-                    ctx = ctx,
-                    callId = callId,
-                    username = username,
-                    isVideo = isVideo,
-                    openUi = true,
-                    playRingback = false,
-                    initializeConnection = true // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
-                )
+                // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Сначала открываем Activity
+                // Activity сама запустит CallService когда будет в foreground
+                val activityIntent = Intent(ctx, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    putExtra("action", "accept")
+                    putExtra("callId", callId)
+                    putExtra("isVideo", isVideo)
+                    putExtra("username", username)
+                }
+                ctx.startActivity(activityIntent)
             }
 
             ACTION_INCOMING_DECLINE, ACTION_HANGUP -> {
                 NotificationHelper.cancelIncomingCall(ctx, callId)
                 OngoingCallStore.clear(ctx)
 
-                // Отправляем внутренний broadcast для UI/менеджера
-                ctx.sendBroadcast(Intent(ACTION_INTERNAL_HANGUP))
+                // Обновляем статус звонка
+                val auth = FirebaseAuth.getInstance()
+                val db = FirebaseFirestore.getInstance()
+                scope.launch {
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("status", "declined", "endedAt", com.google.firebase.firestore.FieldValue.serverTimestamp())
+                    } catch (e: Exception) {
+                        Log.w("CallActionReceiver", "Failed to update call status", e)
+                    }
+                }
+
+                // Отправляем внутренний broadcast
+                ctx.sendBroadcast(Intent(ACTION_INTERNAL_HANGUP).apply {
+                    putExtra(EXTRA_CALL_ID, callId)
+                })
+
+                // Останавливаем сервис
                 CallService.stop(ctx)
             }
 
@@ -74,8 +91,14 @@ class CallActionReceiver : BroadcastReceiver() {
             ACTION_TOGGLE_VIDEO -> ctx.sendBroadcast(Intent(ACTION_INTERNAL_TOGGLE_VIDEO))
 
             ACTION_OPEN_CALL -> {
-                // Открыть экран звонка из шторки (уже активный звонок)
-                CallService.start(ctx, callId, username, isVideo, openUi = true)
+                // Открыть экран звонка из шторки
+                val activityIntent = Intent(ctx, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    putExtra("deeplink_callId", callId)
+                    putExtra("deeplink_isVideo", isVideo)
+                    putExtra("deeplink_username", username)
+                }
+                ctx.startActivity(activityIntent)
             }
         }
     }
