@@ -292,11 +292,35 @@ fun CallScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // Инициализация WebRTC
+    // --- ИНИЦИАЛИЗАЦИЯ WebRTC ДОЛЖНА БЫТЬ ПЕРЕД Firestore LISTENERS ---
+// Инициализируем WebRTC и запускаем локальную часть звонка раньше, чтобы
+// incoming offer / answer не пришли раньше, чем WebRTC готов их обработать.
     LaunchedEffect(callId, isVideo, role) {
         WebRtcCallManager.init(context)
-        WebRtcCallManager.startCall(callId, isVideo, playRingback, role)
+
+        // playRingback должен быть true только для вызывающего (caller).
+        val shouldPlayRingback = role == "caller"
+
+        WebRtcCallManager.startCall(
+            callId = callId,
+            isVideo = isVideo,
+            playRingback = shouldPlayRingback,
+            role = role
+        )
+
+        // Запускаем foreground сервис. Для принимающей стороны передаём
+        // initializeConnection = true — сервис может подготовить ресурсы/инициализировать.
+        CallService.start(
+            ctx = context,
+            callId = callId,
+            username = otherUsername.orEmpty(),
+            isVideo = isVideo,
+            openUi = false,
+            playRingback = shouldPlayRingback,
+            initializeConnection = (role == "callee")
+        )
     }
+
 
     // Cleanup
     DisposableEffect(Unit) {

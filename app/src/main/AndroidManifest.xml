@@ -8,36 +8,37 @@
         android:name="android.hardware.camera"
         android:required="false" />
 
+    <!-- Разрешения для звонков -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
-    <!-- (необязательно) Для audio route через BT на новых Android -->
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-
-    <!-- Foreground service types -->
+    <!-- КРИТИЧЕСКИ ВАЖНО для Android 14+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-
-    <!-- ВАЖНО: не используем FOREGROUND_SERVICE_PHONE_CALL, чтобы не требовались MANAGE_OWN_CALLS/роль Dialer -->
-
-    <!-- Уведомления (Android 13+) -->
+    <!-- Уведомления -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Прочее, если использовалось ранее -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+    <!-- Файлы -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+
 
     <application
         android:name=".App"
@@ -74,7 +75,28 @@
             </intent-filter>
         </activity>
 
-        <!-- FileProvider (если используется) -->
+        <!-- ИСПРАВЛЕНО: Указываем тип foreground service -->
+        <service
+            android:name=".push.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
+
+        <service
+            android:name=".push.CallTrampolineService"
+            android:exported="false" />
+
+        <receiver
+            android:name=".push.CallActionReceiver"
+            android:exported="false" />
+
+        <service
+            android:name=".push.MyFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -85,33 +107,9 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Firebase Cloud Messaging -->
-        <service
-            android:name=".push.MyFirebaseMessagingService"
-            android:exported="false"
-            android:directBootAware="true">
-            <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="messages" />
 
-        <!-- Foreground-сервис для удержания звонка в фоне/при выключенном экране
-             ВАЖНО: без phoneCall в типе -->
-
-
-    <service
-        android:name=".push.CallService"
-        android:foregroundServiceType="camera|microphone"
-        android:exported="false" />
-
-    <service
-        android:name=".push.CallTrampolineService"
-        android:exported="false" />
-
-    <receiver
-        android:name=".push.CallActionReceiver"
-        android:exported="true" />
-        <!-- Ресивер для действия "Завершить" из уведомления текущего звонка -->
-    
     </application>
 </manifest>

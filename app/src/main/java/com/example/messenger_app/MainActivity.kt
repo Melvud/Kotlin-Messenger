@@ -1,16 +1,17 @@
 package com.example.messenger_app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -63,6 +64,16 @@ class MainActivity : ComponentActivity() {
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
+    // НОВОЕ: Лончер для запроса разрешений
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        // Обработка результата запроса разрешений
+        permissions.entries.forEach {
+            android.util.Log.d("Permissions", "${it.key} = ${it.value}")
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -72,6 +83,9 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // НОВОЕ: Запрашиваем все необходимые разрешения
+        requestNecessaryPermissions()
 
         setContent {
             AppTheme {
@@ -136,10 +150,20 @@ class MainActivity : ComponentActivity() {
                                 otherUserName = otherUserName,
                                 onBack = { navController.popBackStack() },
                                 onAudioCall = { callId ->
-                                    navController.navigate(Routes.callRoute(callId, false, otherUserName))
+                                    // Проверяем разрешения перед звонком
+                                    if (checkCallPermissions()) {
+                                        navController.navigate(Routes.callRoute(callId, false, otherUserName))
+                                    } else {
+                                        requestCallPermissions()
+                                    }
                                 },
                                 onVideoCall = { callId ->
-                                    navController.navigate(Routes.callRoute(callId, true, otherUserName))
+                                    // Проверяем разрешения перед звонком
+                                    if (checkCallPermissions(includeCamera = true)) {
+                                        navController.navigate(Routes.callRoute(callId, true, otherUserName))
+                                    } else {
+                                        requestCallPermissions(includeCamera = true)
+                                    }
                                 }
                             )
                         }
@@ -207,11 +231,15 @@ class MainActivity : ComponentActivity() {
                     val otherUserNameToOpen = i.getStringExtra("otherUserName")
 
                     when {
-                        // НОВОЕ: Обработка принятия звонка из уведомления
                         action == "accept" && !callId.isNullOrBlank() -> {
                             val isVideo = isVideoFromIntent || type.equals("video", ignoreCase = true)
 
-                            // Теперь мы в foreground, можем безопасно стартовать CallService
+                            // Проверяем разрешения перед принятием звонка
+                            if (!checkCallPermissions(includeCamera = isVideo)) {
+                                requestCallPermissions(includeCamera = isVideo)
+                                return
+                            }
+
                             CallService.start(
                                 ctx = this,
                                 callId = callId,
@@ -222,7 +250,6 @@ class MainActivity : ComponentActivity() {
                                 initializeConnection = true
                             )
 
-                            // Переходим на экран звонка
                             navController.navigate(Routes.callRoute(callId, isVideo, fromName)) {
                                 launchSingleTop = true
                             }
@@ -272,5 +299,60 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // НОВОЕ: Функции для работы с разрешениями
+    private fun requestNecessaryPermissions() {
+        val permissions = mutableListOf<String>()
+
+        // Базовые разрешения для звонков
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.RECORD_AUDIO)
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.CAMERA)
+        }
+
+        // Уведомления для Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        if (permissions.isNotEmpty()) {
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    private fun checkCallPermissions(includeCamera: Boolean = false): Boolean {
+        val audioGranted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val cameraGranted = if (includeCamera) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        } else true
+
+        return audioGranted && cameraGranted
+    }
+
+    private fun requestCallPermissions(includeCamera: Boolean = false) {
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (includeCamera) {
+            permissions.add(Manifest.permission.CAMERA)
+        }
+        permissionLauncher.launch(permissions.toTypedArray())
     }
 }

@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.example.messenger_app.ui.chats
 
@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,10 +27,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -42,13 +47,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.absoluteValue
+import kotlin.math.roundToInt
 
 /**
- * УЛУЧШЕННЫЙ ЭКРАН ЧАТА
- * - Современный дизайн
- * - Анимация "печатает..."
+ * УЛУЧШЕННЫЙ ЭКРАН ЧАТА ANTIMAX
+ * - Свайп для ответа (влево - свое сообщение, вправо - чужое)
+ * - Анимация "печатает..." с точками
  * - Долгое нажатие для редактирования/удаления
- * - Отслеживание активного чата для предотвращения уведомлений
+ * - Отметка "изм." для отредактированных сообщений
+ * - Автоматическое обновление статуса прочтения
  */
 @Composable
 fun ChatScreen(
@@ -93,12 +101,12 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    // НОВОЕ: Устанавливаем активный чат при входе
+    // Устанавливаем активный чат при входе
     LaunchedEffect(actualChatId) {
         actualChatId?.let { chatRepo.setActiveChat(it) }
     }
 
-    // НОВОЕ: Очищаем активный чат при выходе
+    // Очищаем активный чат при выходе
     DisposableEffect(Unit) {
         onDispose {
             scope.launch {
@@ -114,17 +122,31 @@ fun ChatScreen(
         }
     }
 
-    // УЛУЧШЕНО: Пометка сообщений как прочитанных
     LaunchedEffect(messages, actualChatId) {
+        // Если у нас ещё нет actualChatId, попробуем создать/получить его (новый чат).
+        if ((actualChatId == null || actualChatId!!.isBlank()) && messages.isNotEmpty()) {
+            try {
+                actualChatId = chatRepo.getOrCreateChat(otherUserId)
+            } catch (e: Exception) {
+                // логируем, но продолжаем — не хотим крушить UI
+                e.printStackTrace()
+            }
+        }
+
         if (actualChatId != null && actualChatId!!.isNotBlank()) {
             val unreadMessages = messages
                 .filter { it.senderId != myUid && it.status != MessageStatus.READ }
                 .map { it.id }
             if (unreadMessages.isNotEmpty()) {
-                chatRepo.markMessagesAsRead(actualChatId!!, unreadMessages)
+                try {
+                    chatRepo.markMessagesAsRead(actualChatId!!, unreadMessages)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
     }
+
 
     // Обработка печати
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
@@ -273,7 +295,7 @@ fun ChatScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 color = Color.White
                             )
-                            // УЛУЧШЕНО: Анимированный индикатор печати
+                            // Анимированный индикатор печати
                             AnimatedVisibility(
                                 visible = isOtherUserTyping,
                                 enter = fadeIn() + expandVertically(),
@@ -424,7 +446,6 @@ fun ChatScreen(
                                             }
 
                                             if (messageToEdit != null) {
-                                                // Редактирование
                                                 chatRepo.editMessage(
                                                     chatId = actualChatId!!,
                                                     messageId = messageToEdit!!.id,
@@ -432,7 +453,6 @@ fun ChatScreen(
                                                 )
                                                 messageToEdit = null
                                             } else {
-                                                // Новое сообщение
                                                 chatRepo.sendTextMessage(
                                                     chatId = actualChatId!!,
                                                     text = messageText,
@@ -504,21 +524,18 @@ fun ChatScreen(
                     contentPadding = PaddingValues(vertical = 12.dp, horizontal = 8.dp)
                 ) {
                     items(messages, key = { it.id }) { message ->
-                        // Фильтруем удаленные сообщения
-                        val deletedFor = (message as? Any)?.let {
-                            // Можно добавить поле deletedFor в Message
-                            false
-                        } ?: false
+                        val deletedFor = message.deletedFor
+                        val isDeletedForMe = deletedFor.contains(myUid)
 
-                        if (!deletedFor) {
-                            ModernMessageBubble(
+                        if (!isDeletedForMe) {
+                            SwipeableMessageBubble(
                                 message = message,
                                 isMyMessage = message.senderId == myUid,
                                 onLongClick = {
                                     selectedMessage = message
                                     showMessageOptions = true
                                 },
-                                onReplyClick = {
+                                onSwipeReply = {
                                     replyToMessage = message
                                 }
                             )
@@ -546,7 +563,6 @@ fun ChatScreen(
             )
         }
 
-        // НОВОЕ: Диалог опций сообщения
         if (showMessageOptions && selectedMessage != null) {
             MessageOptionsDialog(
                 message = selectedMessage!!,
@@ -584,7 +600,8 @@ fun ChatScreen(
     }
 }
 
-// НОВОЕ: Анимация точек при печати
+// ==================== АНИМАЦИЯ ПЕЧАТАНИЯ ====================
+
 @Composable
 private fun TypingAnimation() {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
@@ -611,6 +628,275 @@ private fun TypingAnimation() {
         }
     }
 }
+
+// ==================== СВАЙПАЕМОЕ СООБЩЕНИЕ ====================
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SwipeableMessageBubble(
+    message: Message,
+    isMyMessage: Boolean,
+    onLongClick: () -> Unit,
+    onSwipeReply: () -> Unit
+) {
+    var offsetX by remember { mutableStateOf(0f) }
+    val maxSwipe = 100f
+    val density = LocalDensity.current
+
+    val swipeDirection = if (isMyMessage) -1f else 1f // Влево для своих, вправо для чужих
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        if (offsetX.absoluteValue > maxSwipe / 2) {
+                            onSwipeReply()
+                        }
+                        offsetX = 0f
+                    },
+                    onHorizontalDrag = { _, dragAmount ->
+                        val newOffset = offsetX + dragAmount
+                        // Ограничиваем свайп правильным направлением
+                        offsetX = if (swipeDirection > 0) {
+                            newOffset.coerceIn(0f, maxSwipe)
+                        } else {
+                            newOffset.coerceIn(-maxSwipe, 0f)
+                        }
+                    }
+                )
+            },
+        horizontalArrangement = if (isMyMessage) Arrangement.End else Arrangement.Start
+    ) {
+        Box {
+            // Иконка реплая, появляющаяся при свайпе
+            if (offsetX.absoluteValue > 10f) {
+                Icon(
+                    Icons.Default.Reply,
+                    contentDescription = "Ответить",
+                    modifier = Modifier
+                        .align(if (isMyMessage) Alignment.CenterEnd else Alignment.CenterStart)
+                        .padding(horizontal = 16.dp)
+                        .graphicsLayer {
+                            alpha = (offsetX.absoluteValue / maxSwipe).coerceIn(0f, 1f)
+                            scaleX = (offsetX.absoluteValue / maxSwipe).coerceIn(0.5f, 1f)
+                            scaleY = (offsetX.absoluteValue / maxSwipe).coerceIn(0.5f, 1f)
+                        },
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            }
+
+            // Само сообщение
+            Surface(
+                shape = RoundedCornerShape(
+                    topStart = 20.dp,
+                    topEnd = 20.dp,
+                    bottomStart = if (isMyMessage) 20.dp else 6.dp,
+                    bottomEnd = if (isMyMessage) 6.dp else 20.dp
+                ),
+                color = if (isMyMessage) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                shadowElevation = 1.dp,
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .offset { IntOffset(offsetX.roundToInt(), 0) }
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = onLongClick
+                    )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    if (message.replyToId != null && message.replyToText != null) {
+                        Surface(
+                            color = if (isMyMessage)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            else
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .height(36.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            RoundedCornerShape(1.5.dp)
+                                        )
+                                )
+                                Column {
+                                    Text(
+                                        text = message.senderName,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = message.replyToText,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    when (message.type) {
+                        MessageType.TEXT -> {
+                            Text(
+                                text = message.content,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        MessageType.IMAGE -> {
+                            Image(
+                                painter = rememberAsyncImagePainter(message.content),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .widthIn(max = 240.dp)
+                                    .heightIn(max = 320.dp)
+                                    .clip(RoundedCornerShape(14.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        MessageType.VIDEO -> {
+                            Box {
+                                if (message.thumbnailUrl != null) {
+                                    Image(
+                                        painter = rememberAsyncImagePainter(message.thumbnailUrl),
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .widthIn(max = 240.dp)
+                                            .heightIn(max = 320.dp)
+                                            .clip(RoundedCornerShape(14.dp)),
+                                        contentScale = ContentScale.Fit
+                                    )
+                                }
+                                Icon(
+                                    Icons.Default.PlayCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .align(Alignment.Center),
+                                    tint = Color.White.copy(alpha = 0.9f)
+                                )
+                            }
+                        }
+                        MessageType.FILE -> {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.InsertDriveFile,
+                                        null,
+                                        modifier = Modifier.size(32.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Column {
+                                        Text(
+                                            text = message.fileName ?: "Файл",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        message.fileSize?.let { size ->
+                                            Text(
+                                                text = formatFileSize(size),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        MessageType.STICKER -> {
+                            Image(
+                                painter = rememberAsyncImagePainter(message.content),
+                                contentDescription = null,
+                                modifier = Modifier.size(160.dp)
+                            )
+                        }
+                        else -> {
+                            Text(
+                                text = "Неподдерживаемый тип",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.End)
+                            .padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Показываем "изм." если сообщение отредактировано
+                        if (message.isEdited) {
+                            Text(
+                                text = "изм.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                fontSize = 10.sp
+                            )
+                        }
+                        message.timestamp?.let { timestamp ->
+                            Text(
+                                text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(timestamp.toDate()),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                fontSize = 11.sp
+                            )
+                        }
+                        if (isMyMessage) {
+                            Icon(
+                                imageVector = when (message.status) {
+                                    MessageStatus.SENDING -> Icons.Default.Schedule
+                                    MessageStatus.SENT -> Icons.Default.Done
+                                    MessageStatus.DELIVERED -> Icons.Default.DoneAll
+                                    MessageStatus.READ -> Icons.Default.DoneAll
+                                    MessageStatus.FAILED -> Icons.Default.Error
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = when (message.status) {
+                                    MessageStatus.READ -> MaterialTheme.colorScheme.primary
+                                    MessageStatus.FAILED -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==================== UI КОМПОНЕНТЫ ====================
 
 @Composable
 private fun EmptyChatView(otherUserName: String) {
@@ -797,227 +1083,6 @@ private fun EditPreview(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ModernMessageBubble(
-    message: Message,
-    isMyMessage: Boolean,
-    onLongClick: () -> Unit,
-    onReplyClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        horizontalArrangement = if (isMyMessage) Arrangement.End else Arrangement.Start
-    ) {
-        Surface(
-            shape = RoundedCornerShape(
-                topStart = 20.dp,
-                topEnd = 20.dp,
-                bottomStart = if (isMyMessage) 20.dp else 6.dp,
-                bottomEnd = if (isMyMessage) 6.dp else 20.dp
-            ),
-            color = if (isMyMessage) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
-            shadowElevation = 1.dp,
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = onLongClick
-                )
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
-            ) {
-                if (message.replyToId != null && message.replyToText != null) {
-                    Surface(
-                        color = if (isMyMessage)
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                        else
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 8.dp)
-                            .clickable { onReplyClick() }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .height(36.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary,
-                                        RoundedCornerShape(1.5.dp)
-                                    )
-                            )
-                            Column {
-                                Text(
-                                    text = message.senderName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = message.replyToText,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                when (message.type) {
-                    MessageType.TEXT -> {
-                        Text(
-                            text = message.content,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                    MessageType.IMAGE -> {
-                        Image(
-                            painter = rememberAsyncImagePainter(message.content),
-                            contentDescription = null,
-                            modifier = Modifier
-                                .widthIn(max = 240.dp)
-                                .heightIn(max = 320.dp)
-                                .clip(RoundedCornerShape(14.dp)),
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                    MessageType.VIDEO -> {
-                        Box {
-                            if (message.thumbnailUrl != null) {
-                                Image(
-                                    painter = rememberAsyncImagePainter(message.thumbnailUrl),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .widthIn(max = 240.dp)
-                                        .heightIn(max = 320.dp)
-                                        .clip(RoundedCornerShape(14.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                            }
-                            Icon(
-                                Icons.Default.PlayCircle,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(56.dp)
-                                    .align(Alignment.Center),
-                                tint = Color.White.copy(alpha = 0.9f)
-                            )
-                        }
-                    }
-                    MessageType.FILE -> {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.InsertDriveFile,
-                                    null,
-                                    modifier = Modifier.size(32.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                                Column {
-                                    Text(
-                                        text = message.fileName ?: "Файл",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                    message.fileSize?.let { size ->
-                                        Text(
-                                            text = formatFileSize(size),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    MessageType.STICKER -> {
-                        Image(
-                            painter = rememberAsyncImagePainter(message.content),
-                            contentDescription = null,
-                            modifier = Modifier.size(160.dp)
-                        )
-                    }
-                    else -> {
-                        Text(
-                            text = "Неподдерживаемый тип",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.End)
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // УЛУЧШЕНО: Показываем "изм." если сообщение отредактировано
-                    if (message.isEdited) {
-                        Text(
-                            text = "изм.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            fontSize = 10.sp
-                        )
-                    }
-                    message.timestamp?.let { timestamp ->
-                        Text(
-                            text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(timestamp.toDate()),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                            fontSize = 11.sp
-                        )
-                    }
-                    if (isMyMessage) {
-                        Icon(
-                            imageVector = when (message.status) {
-                                MessageStatus.SENDING -> Icons.Default.Schedule
-                                MessageStatus.SENT -> Icons.Default.Done
-                                MessageStatus.DELIVERED -> Icons.Default.DoneAll
-                                MessageStatus.READ -> Icons.Default.DoneAll
-                                MessageStatus.FAILED -> Icons.Default.Error
-                            },
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = when (message.status) {
-                                MessageStatus.READ -> MaterialTheme.colorScheme.primary
-                                MessageStatus.FAILED -> MaterialTheme.colorScheme.error
-                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-// НОВОЕ: Диалог опций сообщения
 @Composable
 private fun MessageOptionsDialog(
     message: Message,
@@ -1046,7 +1111,6 @@ private fun MessageOptionsDialog(
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
 
-                // Ответить
                 MessageOptionItem(
                     icon = Icons.Default.Reply,
                     text = "Ответить",
@@ -1056,7 +1120,6 @@ private fun MessageOptionsDialog(
                     }
                 )
 
-                // Редактировать (только для своих текстовых сообщений)
                 if (isMyMessage && message.type == MessageType.TEXT) {
                     MessageOptionItem(
                         icon = Icons.Default.Edit,
@@ -1070,7 +1133,6 @@ private fun MessageOptionsDialog(
 
                 Divider(modifier = Modifier.padding(vertical = 4.dp))
 
-                // Удалить у меня
                 MessageOptionItem(
                     icon = Icons.Default.DeleteOutline,
                     text = "Удалить у меня",
@@ -1081,7 +1143,6 @@ private fun MessageOptionsDialog(
                     }
                 )
 
-                // Удалить у всех (только для своих сообщений)
                 if (isMyMessage) {
                     MessageOptionItem(
                         icon = Icons.Default.DeleteForever,
