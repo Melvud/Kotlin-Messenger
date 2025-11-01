@@ -64,26 +64,27 @@ class MainActivity : ComponentActivity() {
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
-    // Хранение ожидающего намерения для обработки после получения разрешений
+    // Storage for pending intent to process after permissions are granted
     private var pendingIntent: Intent? = null
 
-    // НОВОЕ: Лончер для запроса разрешений
+    // Permission launcher for requesting call and notification permissions
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // Обработка результата запроса разрешений
+        // Log permission results
         permissions.entries.forEach {
             android.util.Log.d("Permissions", "${it.key} = ${it.value}")
         }
         
-        // Если все необходимые разрешения получены, обработать ожидающее намерение
+        // Process pending intent if all required permissions were granted
         val allGranted = permissions.values.all { it }
-        if (allGranted && pendingIntent != null) {
-            android.util.Log.d("Permissions", "All permissions granted, processing pending intent")
-            val intent = pendingIntent
-            pendingIntent = null
-            intent?.let { intentEvents.tryEmit(it) }
-        } else if (!allGranted) {
+        if (allGranted) {
+            pendingIntent?.let { intent ->
+                android.util.Log.d("Permissions", "All permissions granted, processing pending intent")
+                pendingIntent = null
+                intentEvents.tryEmit(intent)
+            }
+        } else {
             android.util.Log.w("Permissions", "Not all permissions granted")
             pendingIntent = null
         }
