@@ -8,7 +8,9 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -19,11 +21,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -48,8 +53,12 @@ import org.webrtc.SurfaceViewRenderer
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *          ИСПРАВЛЕННЫЙ CALL SCREEN БЕЗ RECOMPOSITION
+ *         ПОЛНОСТЬЮ РАБОЧИЙ CALL SCREEN С КРАСИВЫМ ДИЗАЙНОМ
  * ═══════════════════════════════════════════════════════════════
+ * ✅ Единый экран для аудио и видео
+ * ✅ Видео отображается обоим участникам
+ * ✅ Красивый современный дизайн
+ * ✅ Правильная обработка всех состояний
  */
 @Composable
 fun CallScreen(
@@ -116,13 +125,9 @@ fun CallScreen(
             ════════════════════════════════════════
         """.trimIndent())
 
-        // Clear notification
         NotificationHelper.cancelIncomingCall(context, callId)
-
-        // Initialize WebRTC ONCE
         WebRtcCallManager.init(context)
 
-        // Start call
         WebRtcCallManager.startCall(
             callId = callId,
             isVideo = isVideo,
@@ -130,7 +135,6 @@ fun CallScreen(
             role = role
         )
 
-        // Start service
         CallService.start(
             ctx = context,
             callId = callId,
@@ -210,7 +214,6 @@ fun CallScreen(
             if (error != null) return@addSnapshotListener
             val data = snap?.data ?: return@addSnapshotListener
 
-            // Get peer name
             if (peerName == "Собеседник") {
                 val name = when (role) {
                     "caller" -> (data["calleeUsername"] ?: data["toUsername"]) as? String
@@ -222,7 +225,6 @@ fun CallScreen(
                 }
             }
 
-            // Handle SDP
             if (role == "callee") {
                 val offer = (data["offer"] as? Map<*, *>)?.get("sdp") as? String
                 if (!offer.isNullOrBlank() && !offerApplied.value) {
@@ -242,7 +244,6 @@ fun CallScreen(
                 }
             }
 
-            // Handle startedAt
             val ts = data["startedAt"]
             if (ts is com.google.firebase.Timestamp) {
                 if (startedAtMillis == null) {
@@ -251,14 +252,12 @@ fun CallScreen(
                 }
             }
 
-            // Video upgrade
             val videoUpgradeTs = data["videoUpgradeRequest"]
             if (videoUpgradeTs != null && role == "callee") {
                 val fromUser = (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
                 WebRtcCallManager.onRemoteVideoUpgradeRequest(fromUser)
             }
 
-            // End call
             if (data["endedAt"] != null && !callEnded) {
                 callEnded = true
                 WebRtcCallManager.endCall()
@@ -348,7 +347,7 @@ fun CallScreen(
 
     // ==================== UI ====================
 
-    CallUI(
+    ModernCallUI(
         peerName = peerName,
         elapsedMillis = elapsedMillis,
         isMuted = isMuted,
@@ -381,7 +380,7 @@ fun CallScreen(
 
     // Dialogs
     videoUpgradeRequest?.let { request ->
-        VideoUpgradeDialog(
+        ModernVideoUpgradeDialog(
             fromUsername = request.fromUsername,
             onAccept = { WebRtcCallManager.acceptVideoUpgrade() },
             onDecline = { WebRtcCallManager.declineVideoUpgrade() }
@@ -420,11 +419,11 @@ fun CallScreen(
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                            MAIN UI
+//                     СОВРЕМЕННЫЙ ДИЗАЙН UI
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun CallUI(
+private fun ModernCallUI(
     peerName: String,
     elapsedMillis: Long,
     isMuted: Boolean,
@@ -441,8 +440,10 @@ private fun CallUI(
     onSwapVideo: () -> Unit,
     onHangup: () -> Unit
 ) {
-    val showVideo = isLocalVideoEnabled || isRemoteVideoEnabled
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
+
+    // Определяем что показывать
+    val hasAnyVideo = isLocalVideoEnabled || isRemoteVideoEnabled
 
     Box(
         modifier = Modifier
@@ -450,26 +451,66 @@ private fun CallUI(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF667EEA),
-                        Color(0xFF764BA2)
+                        Color(0xFF4A90E2), // Мягкий синий
+                        Color(0xFF7B68EE), // Мягкий фиолетовый
+                        Color(0xFF9B59B6)  // Мягкий пурпурный
                     )
                 )
             )
     ) {
-        // Video or Audio
-        if (showVideo) {
-            VideoContent(
-                isLocalVideoEnabled = isLocalVideoEnabled,
-                isRemoteVideoEnabled = isRemoteVideoEnabled,
-                videoSwapped = videoSwapped,
-                peerName = peerName,
-                onSwapVideo = onSwapVideo
-            )
-        } else {
-            AudioContent(peerName = peerName, isConnected = isConnected)
+        // ═══ ГЛАВНЫЙ КОНТЕНТ ═══
+        Box(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            when {
+                // Если есть удаленное видео - показываем его на весь экран
+                isRemoteVideoEnabled && !videoSwapped -> {
+                    RemoteVideoFullScreen()
+                    if (isLocalVideoEnabled) {
+                        LocalVideoPip(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp)
+                                .zIndex(10f),
+                            onSwap = onSwapVideo
+                        )
+                    }
+                }
+
+                // Если есть локальное видео и удаленного нет - показываем локальное
+                isLocalVideoEnabled && !isRemoteVideoEnabled && !videoSwapped -> {
+                    LocalVideoFullScreen()
+                }
+
+                // Если своппнуто - наоборот
+                isLocalVideoEnabled && videoSwapped -> {
+                    LocalVideoFullScreen()
+                    if (isRemoteVideoEnabled) {
+                        RemoteVideoPip(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp)
+                                .zIndex(10f),
+                            onSwap = onSwapVideo
+                        )
+                    }
+                }
+
+                isRemoteVideoEnabled && videoSwapped -> {
+                    RemoteVideoFullScreen()
+                }
+
+                // Если видео нет совсем - показываем красивый аудио экран
+                else -> {
+                    ModernAudioContent(
+                        peerName = peerName,
+                        isConnected = isConnected
+                    )
+                }
+            }
         }
 
-        // Top overlay
+        // ═══ ВЕРХНИЙ ОВЕРЛЕЙ С ИНФОРМАЦИЕЙ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -477,51 +518,73 @@ private fun CallUI(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color.Black.copy(0.6f),
+                            Color.Black.copy(0.7f),
+                            Color.Black.copy(0.3f),
                             Color.Transparent
                         )
                     )
                 )
-                .padding(top = 50.dp, bottom = 30.dp),
+                .padding(top = 50.dp, bottom = 40.dp, start = 20.dp, end = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Имя собеседника
             Text(
                 text = peerName,
                 style = MaterialTheme.typography.headlineMedium,
                 color = Color.White,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                fontSize = 28.sp
             )
 
             Spacer(Modifier.height(8.dp))
 
+            // Статус звонка
             val statusText = when (connectionState) {
                 WebRtcCallManager.ConnectionState.CONNECTING -> "Соединение..."
                 WebRtcCallManager.ConnectionState.CONNECTED -> formatTime(elapsedMillis)
                 WebRtcCallManager.ConnectionState.RECONNECTING -> "Переподключение..."
-                WebRtcCallManager.ConnectionState.FAILED -> "Ошибка"
+                WebRtcCallManager.ConnectionState.FAILED -> "Ошибка соединения"
                 WebRtcCallManager.ConnectionState.DISCONNECTED -> "Отключено"
             }
 
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.titleLarge,
-                color = Color.White,
-                fontWeight = FontWeight.Medium
-            )
-
-            Spacer(Modifier.height(12.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (connectionState != WebRtcCallManager.ConnectionState.CONNECTED) {
-                    StatusChip(connectionState)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (connectionState == WebRtcCallManager.ConnectionState.CONNECTING) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
                 }
-                if (callQuality != WebRtcCallManager.Quality.Good && isConnected) {
-                    QualityChip(callQuality)
+
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White.copy(0.9f),
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 18.sp
+                )
+            }
+
+            // Индикаторы
+            if (connectionState != WebRtcCallManager.ConnectionState.CONNECTED ||
+                callQuality != WebRtcCallManager.Quality.Good) {
+                Spacer(Modifier.height(12.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (connectionState != WebRtcCallManager.ConnectionState.CONNECTED) {
+                        ModernStatusChip(connectionState)
+                    }
+                    if (callQuality != WebRtcCallManager.Quality.Good && isConnected) {
+                        ModernQualityChip(callQuality)
+                    }
                 }
             }
         }
 
-        // Bottom controls
+        // ═══ НИЖНИЙ ОВЕРЛЕЙ С КНОПКАМИ УПРАВЛЕНИЯ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -530,139 +593,95 @@ private fun CallUI(
                     Brush.verticalGradient(
                         colors = listOf(
                             Color.Transparent,
-                            Color.Black.copy(0.7f)
+                            Color.Black.copy(0.3f),
+                            Color.Black.copy(0.8f)
                         )
                     )
                 )
-                .padding(bottom = 40.dp, top = 30.dp),
+                .padding(bottom = 50.dp, top = 40.dp, start = 20.dp, end = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Основные кнопки управления
             Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ControlButton(
+                // Микрофон
+                ModernControlButton(
                     icon = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
                     isActive = !isMuted,
+                    label = if (isMuted) "Откл" else "Вкл",
                     onClick = onToggleMic
                 )
 
-                ControlButton(
+                // Видео
+                ModernControlButton(
                     icon = if (isLocalVideoEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
                     isActive = isLocalVideoEnabled,
+                    label = if (isLocalVideoEnabled) "Видео" else "Видео",
                     onClick = onToggleVideo
                 )
 
+                // Динамик
+                ModernControlButton(
+                    icon = if (isSpeakerOn) Icons.Default.VolumeUp else Icons.Default.VolumeDown,
+                    isActive = isSpeakerOn,
+                    label = if (isSpeakerOn) "Динамик" else "Наушники",
+                    onClick = onToggleSpeaker
+                )
+
+                // Камера (только если видео включено)
                 if (isLocalVideoEnabled) {
-                    ControlButton(
+                    ModernControlButton(
                         icon = Icons.Default.Cameraswitch,
                         isActive = true,
+                        label = "Камера",
                         onClick = onSwitchCamera
                     )
                 }
-
-                ControlButton(
-                    icon = if (isSpeakerOn) Icons.Default.VolumeUp else Icons.Default.VolumeDown,
-                    isActive = isSpeakerOn,
-                    onClick = onToggleSpeaker
-                )
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(32.dp))
 
+            // Кнопка завершить звонок
             Surface(
                 onClick = onHangup,
-                modifier = Modifier.size(68.dp),
+                modifier = Modifier.size(70.dp),
                 shape = CircleShape,
                 color = Color(0xFFFF3B30),
-                shadowElevation = 12.dp
+                shadowElevation = 16.dp
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         Icons.Default.CallEnd,
-                        contentDescription = null,
-                        modifier = Modifier.size(32.dp),
+                        contentDescription = "Завершить",
+                        modifier = Modifier.size(34.dp),
                         tint = Color.White
                     )
                 }
             }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                text = "Завершить",
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                         VIDEO CONTENT
+//                         VIDEO VIEWS
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun VideoContent(
-    isLocalVideoEnabled: Boolean,
-    isRemoteVideoEnabled: Boolean,
-    videoSwapped: Boolean,
-    peerName: String,
-    onSwapVideo: () -> Unit
-) {
-    val showRemoteAsMain = !videoSwapped
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        // Main video
-        when {
-            showRemoteAsMain && isRemoteVideoEnabled -> {
-                RemoteVideoView(Modifier.fillMaxSize())
-            }
-            !showRemoteAsMain && isLocalVideoEnabled -> {
-                LocalVideoView(Modifier.fillMaxSize())
-            }
-            else -> {
-                VideoPlaceholder(peerName)
-            }
-        }
-
-        // PIP video
-        AnimatedVisibility(
-            visible = (showRemoteAsMain && isLocalVideoEnabled) || (!showRemoteAsMain && isRemoteVideoEnabled),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp)
-                .zIndex(10f)
-        ) {
-            Surface(
-                modifier = Modifier
-                    .size(100.dp, 140.dp)
-                    .clickable(onClick = onSwapVideo),
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Black,
-                shadowElevation = 12.dp
-            ) {
-                if (showRemoteAsMain && isLocalVideoEnabled) {
-                    LocalVideoView(Modifier.fillMaxSize())
-                } else if (!showRemoteAsMain && isRemoteVideoEnabled) {
-                    RemoteVideoView(Modifier.fillMaxSize())
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LocalVideoView(modifier: Modifier) {
+private fun RemoteVideoFullScreen() {
     AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            SurfaceViewRenderer(ctx).apply {
-                WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = false)
-                post {
-                    WebRtcCallManager.bindLocalRenderer(this)
-                }
-            }
-        }
-    )
-}
-
-@Composable
-private fun RemoteVideoView(modifier: Modifier) {
-    AndroidView(
-        modifier = modifier,
+        modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             SurfaceViewRenderer(ctx).apply {
                 WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
@@ -675,137 +694,225 @@ private fun RemoteVideoView(modifier: Modifier) {
 }
 
 @Composable
-private fun VideoPlaceholder(name: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF2C2C3E)),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(120.dp)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                Color(0xFF667EEA),
-                                Color(0xFF764BA2)
-                            )
-                        ),
-                        CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = name.firstOrNull()?.uppercase() ?: "?",
-                    style = MaterialTheme.typography.displayLarge,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
+private fun LocalVideoFullScreen() {
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            SurfaceViewRenderer(ctx).apply {
+                WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = false)
+                post {
+                    WebRtcCallManager.bindLocalRenderer(this)
+                }
             }
+        }
+    )
+}
 
-            Icon(
-                Icons.Default.VideocamOff,
-                contentDescription = null,
-                modifier = Modifier.size(32.dp),
-                tint = Color.White.copy(0.7f)
+@Composable
+private fun LocalVideoPip(
+    modifier: Modifier,
+    onSwap: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .size(120.dp, 160.dp)
+            .clickable(onClick = onSwap),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black,
+        shadowElevation = 16.dp
+    ) {
+        Box {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    SurfaceViewRenderer(ctx).apply {
+                        WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
+                        post {
+                            WebRtcCallManager.bindLocalRenderer(this)
+                        }
+                    }
+                }
             )
 
-            Text(
-                "Камера выключена",
-                style = MaterialTheme.typography.bodyLarge,
-                color = Color.White.copy(0.7f)
+            // Иконка swap
+            Icon(
+                Icons.Default.SwapVert,
+                contentDescription = "Поменять",
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(20.dp),
+                tint = Color.White
+            )
+        }
+    }
+}
+
+@Composable
+private fun RemoteVideoPip(
+    modifier: Modifier,
+    onSwap: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .size(120.dp, 160.dp)
+            .clickable(onClick = onSwap),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black,
+        shadowElevation = 16.dp
+    ) {
+        Box {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    SurfaceViewRenderer(ctx).apply {
+                        WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = true)
+                        post {
+                            WebRtcCallManager.bindRemoteRenderer(this)
+                        }
+                    }
+                }
+            )
+
+            Icon(
+                Icons.Default.SwapVert,
+                contentDescription = "Поменять",
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(20.dp),
+                tint = Color.White
             )
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                         AUDIO CONTENT
+//                    AUDIO CONTENT (БЕЗ ВИДЕО)
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun AudioContent(peerName: String, isConnected: Boolean) {
+private fun ModernAudioContent(
+    peerName: String,
+    isConnected: Boolean
+) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-        val scale by infiniteTransition.animateFloat(
-            initialValue = 1f,
-            targetValue = if (isConnected) 1f else 1.1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1500),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "scale"
-        )
+        // Анимированные круги
+        if (!isConnected) {
+            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
 
-        Box(
-            modifier = Modifier.size(160.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            if (!isConnected) {
-                repeat(3) { i ->
-                    val alpha by infiniteTransition.animateFloat(
-                        initialValue = 0.6f,
-                        targetValue = 0f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(2000, delayMillis = i * 700),
-                            repeatMode = RepeatMode.Restart
-                        ),
-                        label = "alpha$i"
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .scale(1f + (i * 0.4f))
-                            .background(
-                                Color.White.copy(alpha * 0.3f),
-                                CircleShape
-                            )
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .size(140.dp)
-                    .scale(scale)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                Color.White.copy(0.3f),
-                                Color.White.copy(0.1f)
-                            )
-                        ),
-                        CircleShape
+            repeat(3) { i ->
+                val scale by infiniteTransition.animateFloat(
+                    initialValue = 1f,
+                    targetValue = 2f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(2500, delayMillis = i * 800, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
                     ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = peerName.firstOrNull()?.uppercase() ?: "?",
-                    style = MaterialTheme.typography.displayLarge,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 60.sp
+                    label = "scale$i"
+                )
+
+                val alpha by infiniteTransition.animateFloat(
+                    initialValue = 0.6f,
+                    targetValue = 0f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(2500, delayMillis = i * 800, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "alpha$i"
+                )
+
+                Box(
+                    modifier = Modifier
+                        .size(180.dp)
+                        .scale(scale)
+                        .background(
+                            Color.White.copy(alpha * 0.2f),
+                            CircleShape
+                        )
                 )
             }
+        }
+
+        // Аватар
+        Box(
+            modifier = Modifier
+                .size(180.dp)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            Color.White.copy(0.4f),
+                            Color.White.copy(0.2f)
+                        )
+                    ),
+                    CircleShape
+                )
+                .border(4.dp, Color.White.copy(0.3f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = peerName.firstOrNull()?.uppercase() ?: "?",
+                style = MaterialTheme.typography.displayLarge,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 72.sp
+            )
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//                          COMPONENTS
+//                         COMPONENTS
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun StatusChip(state: WebRtcCallManager.ConnectionState) {
+private fun ModernControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isActive: Boolean,
+    label: String,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        val backgroundColor = if (isActive) {
+            Color.White.copy(0.3f)
+        } else {
+            Color(0xFFFF3B30).copy(0.9f)
+        }
+
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.size(64.dp),
+            shape = CircleShape,
+            color = backgroundColor,
+            shadowElevation = 8.dp
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    icon,
+                    contentDescription = label,
+                    modifier = Modifier.size(30.dp),
+                    tint = Color.White
+                )
+            }
+        }
+
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun ModernStatusChip(state: WebRtcCallManager.ConnectionState) {
     val (text, color) = when (state) {
         WebRtcCallManager.ConnectionState.CONNECTING -> "Соединение" to Color(0xFFFFA726)
         WebRtcCallManager.ConnectionState.RECONNECTING -> "Переподключение" to Color(0xFFFFA726)
@@ -815,21 +922,23 @@ private fun StatusChip(state: WebRtcCallManager.ConnectionState) {
     }
 
     Surface(
-        color = color.copy(0.25f),
-        shape = RoundedCornerShape(20.dp)
+        color = color.copy(0.3f),
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(1.dp, color.copy(0.5f))
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             style = MaterialTheme.typography.labelLarge,
             color = Color.White,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp
         )
     }
 }
 
 @Composable
-private fun QualityChip(quality: WebRtcCallManager.Quality) {
+private fun ModernQualityChip(quality: WebRtcCallManager.Quality) {
     val (text, color) = when (quality) {
         WebRtcCallManager.Quality.Medium -> "Среднее качество" to Color(0xFFFFA726)
         WebRtcCallManager.Quality.Poor -> "Плохое качество" to Color(0xFFFF6B6B)
@@ -837,51 +946,23 @@ private fun QualityChip(quality: WebRtcCallManager.Quality) {
     }
 
     Surface(
-        color = color.copy(0.25f),
-        shape = RoundedCornerShape(20.dp)
+        color = color.copy(0.3f),
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(1.dp, color.copy(0.5f))
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             style = MaterialTheme.typography.labelLarge,
             color = Color.White,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp
         )
     }
 }
 
 @Composable
-private fun ControlButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    isActive: Boolean,
-    onClick: () -> Unit
-) {
-    val backgroundColor = if (isActive) {
-        Color.White.copy(0.25f)
-    } else {
-        Color(0xFFFF3B30)
-    }
-
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.size(60.dp),
-        shape = CircleShape,
-        color = backgroundColor,
-        shadowElevation = 8.dp
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                icon,
-                contentDescription = null,
-                modifier = Modifier.size(28.dp),
-                tint = Color.White
-            )
-        }
-    }
-}
-
-@Composable
-private fun VideoUpgradeDialog(
+private fun ModernVideoUpgradeDialog(
     fromUsername: String,
     onAccept: () -> Unit,
     onDecline: () -> Unit
@@ -894,7 +975,7 @@ private fun VideoUpgradeDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(32.dp),
-            shape = RoundedCornerShape(28.dp),
+            shape = RoundedCornerShape(32.dp),
             color = Color.White,
             shadowElevation = 24.dp
         ) {
@@ -904,12 +985,12 @@ private fun VideoUpgradeDialog(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(80.dp)
+                        .size(90.dp)
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    Color(0xFF667EEA),
-                                    Color(0xFF764BA2)
+                                    Color(0xFF4A90E2),
+                                    Color(0xFF7B68EE)
                                 )
                             ),
                             CircleShape
@@ -919,7 +1000,7 @@ private fun VideoUpgradeDialog(
                     Icon(
                         Icons.Default.Videocam,
                         contentDescription = null,
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(45.dp),
                         tint = Color.White
                     )
                 }
@@ -930,24 +1011,31 @@ private fun VideoUpgradeDialog(
                     text = "$fromUsername хочет включить видео",
                     style = MaterialTheme.typography.titleLarge,
                     color = Color(0xFF1A1A1A),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    fontWeight = FontWeight.Bold
+                    textAlign = TextAlign.Center,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp
                 )
 
                 Spacer(Modifier.height(32.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     OutlinedButton(
                         onClick = onDecline,
                         modifier = Modifier
                             .weight(1f)
                             .height(56.dp),
-                        shape = RoundedCornerShape(16.dp)
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(2.dp, Color(0xFF4A90E2))
                     ) {
-                        Text("Отклонить", fontWeight = FontWeight.Medium, fontSize = 16.sp)
+                        Text(
+                            "Отклонить",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = Color(0xFF4A90E2)
+                        )
                     }
 
                     Button(
@@ -957,10 +1045,14 @@ private fun VideoUpgradeDialog(
                             .height(56.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF667EEA)
+                            containerColor = Color(0xFF4A90E2)
                         )
                     ) {
-                        Text("Включить", fontWeight = FontWeight.Medium, fontSize = 16.sp)
+                        Text(
+                            "Включить",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
                     }
                 }
             }
