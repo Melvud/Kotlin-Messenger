@@ -259,40 +259,38 @@ fun CallScreen(
                 }
             }
 
-            if (role == "callee") {
-                val offerMap = data["offer"] as? Map<*, *>
-                val offer = offerMap?.get("sdp") as? String
-                val offerTimestamp = offerMap?.get("timestamp") as? Timestamp
+            // ✅ FIX: Handle offers regardless of role (for renegotiation)
+            val offerMap = data["offer"] as? Map<*, *>
+            val offer = offerMap?.get("sdp") as? String
+            val offerTimestamp = offerMap?.get("timestamp") as? Timestamp
 
-                if (!offer.isNullOrBlank() && offerTimestamp != null) {
-                    val offerTime = offerTimestamp.toDate().time
+            if (!offer.isNullOrBlank() && offerTimestamp != null) {
+                val offerTime = offerTimestamp.toDate().time
 
-                    if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
-                        Log.d("CallScreen", "📥 Applying OFFER (timestamp: $offerTime)")
-                        lastProcessedOfferTime = offerTime
-                        WebRtcCallManager.applyRemoteOffer(offer)
-                    } else {
-                        Log.d("CallScreen", "⚠️ Skipping old offer (timestamp: $offerTime)")
-                    }
+                if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
+                    Log.d("CallScreen", "📥 Applying OFFER (timestamp: $offerTime, role: $role)")
+                    lastProcessedOfferTime = offerTime
+                    WebRtcCallManager.applyRemoteOffer(offer)
+                } else {
+                    Log.d("CallScreen", "⚠️ Skipping old offer (timestamp: $offerTime)")
                 }
             }
 
-            if (role == "caller") {
-                val answerMap = data["answer"] as? Map<*, *>
-                val answer = answerMap?.get("sdp") as? String
-                val answerTimestamp = answerMap?.get("timestamp") as? Timestamp
+            // ✅ FIX: Handle answers regardless of role (for renegotiation)
+            val answerMap = data["answer"] as? Map<*, *>
+            val answer = answerMap?.get("sdp") as? String
+            val answerTimestamp = answerMap?.get("timestamp") as? Timestamp
 
-                if (!answer.isNullOrBlank() && answerTimestamp != null) {
-                    val answerTime = answerTimestamp.toDate().time
+            if (!answer.isNullOrBlank() && answerTimestamp != null) {
+                val answerTime = answerTimestamp.toDate().time
 
-                    if (lastProcessedAnswerTime == null || answerTime > lastProcessedAnswerTime!!) {
-                        Log.d("CallScreen", "📥 Applying ANSWER (timestamp: $answerTime)")
-                        lastProcessedAnswerTime = answerTime
-                        WebRtcCallManager.applyRemoteAnswer(answer)
-                        CallService.stopRingback(context)
-                    } else {
-                        Log.d("CallScreen", "⚠️ Skipping old answer (timestamp: $answerTime)")
-                    }
+                if (lastProcessedAnswerTime == null || answerTime > lastProcessedAnswerTime!!) {
+                    Log.d("CallScreen", "📥 Applying ANSWER (timestamp: $answerTime, role: $role)")
+                    lastProcessedAnswerTime = answerTime
+                    WebRtcCallManager.applyRemoteAnswer(answer)
+                    CallService.stopRingback(context)
+                } else {
+                    Log.d("CallScreen", "⚠️ Skipping old answer (timestamp: $answerTime)")
                 }
             }
 
