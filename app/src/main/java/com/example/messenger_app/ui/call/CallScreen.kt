@@ -270,14 +270,13 @@ fun CallScreen(
                 }
             }
 
-            // ✅ FIX: Handle offers regardless of role (for renegotiation)
+            // ✅ FIX: Callee handles offers, Caller handles answers.
             val offerMap = data["offer"] as? Map<*, *>
             val offer = offerMap?.get("sdp") as? String
             val offerTimestamp = offerMap?.get("timestamp") as? Timestamp
 
-            if (!offer.isNullOrBlank() && offerTimestamp != null) {
+            if (role == "callee" && !offer.isNullOrBlank() && offerTimestamp != null) {
                 val offerTime = offerTimestamp.toDate().time
-
                 if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
                     Log.d("CallScreen", "📥 Applying OFFER (timestamp: $offerTime, role: $role)")
                     lastProcessedOfferTime = offerTime
@@ -287,19 +286,16 @@ fun CallScreen(
                 }
             }
 
-            // ✅ FIX: Handle answers regardless of role (for renegotiation)
             val answerMap = data["answer"] as? Map<*, *>
             val answer = answerMap?.get("sdp") as? String
             val answerTimestamp = answerMap?.get("timestamp") as? Timestamp
 
-            if (!answer.isNullOrBlank() && answerTimestamp != null) {
+            if (role == "caller" && !answer.isNullOrBlank() && answerTimestamp != null) {
                 val answerTime = answerTimestamp.toDate().time
-
                 if (lastProcessedAnswerTime == null || answerTime > lastProcessedAnswerTime!!) {
                     Log.d("CallScreen", "📥 Applying ANSWER (timestamp: $answerTime, role: $role)")
                     lastProcessedAnswerTime = answerTime
                     WebRtcCallManager.applyRemoteAnswer(answer)
-                    CallService.stopRingback(context)
                 } else {
                     Log.d("CallScreen", "⚠️ Skipping old answer (timestamp: $answerTime)")
                 }
@@ -441,6 +437,8 @@ fun CallScreen(
         showEndCallDialog = true
     }
 
+    var isLocalVideoFullScreen by remember { mutableStateOf(false) }
+
     // ✅ FIX: Правильная логика отображения видео
     ModernCallUI(
         peerName = peerName,
@@ -484,7 +482,9 @@ fun CallScreen(
             CallService.stop(context)
             OngoingCallStore.clear(context)
             onNavigateBack()
-        }
+        },
+        isLocalVideoFullScreen = isLocalVideoFullScreen,
+        onToggleLocalVideoFullScreen = { isLocalVideoFullScreen = !isLocalVideoFullScreen }
     )
 
     videoUpgradeRequest?.let { request ->
@@ -553,7 +553,9 @@ private fun ModernCallUI(
     onToggleSpeaker: () -> Unit,
     onToggleVideo: () -> Unit,
     onSwitchCamera: () -> Unit,
-    onHangup: () -> Unit
+    onHangup: () -> Unit,
+    isLocalVideoFullScreen: Boolean,
+    onToggleLocalVideoFullScreen: () -> Unit
 ) {
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
 
@@ -572,35 +574,40 @@ private fun ModernCallUI(
     ) {
         // ═══ КОНТЕНТ ЗВОНКА ═══
         Box(modifier = Modifier.fillMaxSize()) {
-            when {
-                // ✅ ПРИОРИТЕТ 1: Если есть УДАЛЕННОЕ видео - показываем ЕГО на весь экран
-                isRemoteVideoEnabled -> {
-                    Log.d("ModernCallUI", "✅ Showing REMOTE video fullscreen")
-                    RemoteVideoFullScreen()
+            val showLocalVideo = isLocalVideoEnabled
+            val showRemoteVideo = isRemoteVideoEnabled
 
-                    // Показываем локальное в PiP только если оно включено
-                    if (isLocalVideoEnabled) {
-                        LocalVideoPip(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(16.dp)
-                                .zIndex(10f)
-                        )
-                    }
+            if (showLocalVideo && isLocalVideoFullScreen) {
+                // Локальное видео на полный экран
+                LocalVideoFullScreen(Modifier.clickable(onClick = onToggleLocalVideoFullScreen))
+                if (showRemoteVideo) {
+                    // Удаленное в PiP
+                    RemoteVideoPip(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(16.dp)
+                            .zIndex(10f)
+                            .clickable(onClick = onToggleLocalVideoFullScreen)
+                    )
                 }
-
-                // ✅ ПРИОРИТЕТ 2: Если есть только ЛОКАЛЬНОЕ видео
-                isLocalVideoEnabled -> {
-                    Log.d("ModernCallUI", "✅ Showing LOCAL video fullscreen")
-                    LocalVideoFullScreen()
-                }
-
-                // ✅ ПРИОРИТЕТ 3: Аудио режим (нет видео совсем)
-                else -> {
-                    Log.d("ModernCallUI", "✅ Showing AUDIO mode")
+            } else {
+                // Удаленное видео на полный экран (или аудио UI)
+                if (showRemoteVideo) {
+                    RemoteVideoFullScreen(Modifier.clickable(onClick = onToggleLocalVideoFullScreen))
+                } else {
                     ModernAudioContent(
                         peerName = peerName,
                         isConnected = isConnected
+                    )
+                }
+                if (showLocalVideo) {
+                    // Локальное в PiP
+                    LocalVideoPip(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(16.dp)
+                            .zIndex(10f)
+                            .clickable(onClick = onToggleLocalVideoFullScreen)
                     )
                 }
             }
@@ -762,13 +769,13 @@ private fun ModernCallUI(
 }
 
 @Composable
-private fun LocalVideoFullScreen() {
+private fun LocalVideoFullScreen(modifier: Modifier = Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
     Log.d("LocalVideoFullScreen", "📹 Rendering local video fullscreen (recomposition)")
 
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         factory = { ctx ->
             Log.d("LocalVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
@@ -820,13 +827,13 @@ private fun LocalVideoPip(modifier: Modifier) {
 
 // ✅ FIX: Удаленное видео БЕЗ зеркала
 @Composable
-private fun RemoteVideoFullScreen() {
+private fun RemoteVideoFullScreen(modifier: Modifier = Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
     Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen (recomposition)")
 
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         factory = { ctx ->
             Log.d("RemoteVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
@@ -842,6 +849,37 @@ private fun RemoteVideoFullScreen() {
             }
         }
     )
+}
+
+@Composable
+private fun RemoteVideoPip(modifier: Modifier = Modifier) {
+    var rendererReady by remember { mutableStateOf(false) }
+
+    Log.d("RemoteVideoPip", "📹 Rendering remote video PiP (recomposition)")
+
+    Surface(
+        modifier = modifier.size(120.dp, 160.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black,
+        shadowElevation = 16.dp
+    ) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                Log.d("RemoteVideoPip", "📹 Creating renderer (factory)")
+                SurfaceViewRenderer(ctx).apply {
+                    WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = true)
+                    rendererReady = true
+                }
+            },
+            update = { view ->
+                if (rendererReady) {
+                    Log.d("RemoteVideoPip", "📹 Binding remote renderer (update)")
+                    WebRtcCallManager.bindRemoteRenderer(view)
+                }
+            }
+        )
+    }
 }
 
 @Composable

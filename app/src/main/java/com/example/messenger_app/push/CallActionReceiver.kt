@@ -13,12 +13,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-/**
- * ИСПРАВЛЕНО: Правильная обработка принятия звонка с передачей role
- */
 class CallActionReceiver : BroadcastReceiver() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onReceive(ctx: Context, intent: Intent) {
         val action = intent.action.orEmpty()
@@ -26,105 +23,105 @@ class CallActionReceiver : BroadcastReceiver() {
         val username = intent.getStringExtra(EXTRA_USERNAME).orEmpty()
         val isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, false)
 
+        if (callId.isBlank()) {
+            Log.e("CallActionReceiver", "CallID is blank for action: $action, ignoring.")
+            return
+        }
+
         Log.d("CallActionReceiver", "onReceive action=$action, id=$callId, user=$username, video=$isVideo")
 
         when (action) {
-            ACTION_INCOMING_ACCEPT -> {
-                // Закрываем уведомление
-                NotificationHelper.cancelIncomingCall(ctx, callId)
-
-                // Сохраняем состояние звонка
-                OngoingCallStore.save(ctx, callId, isVideo, username)
-
-                // Уведомляем другие устройства
-                val auth = FirebaseAuth.getInstance()
-                val db = FirebaseFirestore.getInstance()
-                val repo = CallsRepository(auth, db)
-                scope.launch {
-                    try {
-                        repo.hangupOtherDevices(callId)
-                    } catch (e: Exception) {
-                        Log.w("CallActionReceiver", "hangupOtherDevices failed", e)
-                    }
-                }
-
-                // ИСПРАВЛЕНИЕ: Передаем правильные параметры для входящего звонка
-                val activityIntent = Intent(ctx, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    putExtra("action", "accept")
-                    putExtra("callId", callId)
-                    putExtra("isVideo", isVideo)
-                    putExtra("username", username)
-                    putExtra("role", "callee") // ВАЖНО: явно указываем роль
-                    putExtra("playRingback", false) // Входящий звонок не играет ringback
-                }
-                ctx.startActivity(activityIntent)
-            }
-
-            ACTION_INCOMING_DECLINE, ACTION_HANGUP -> {
-                NotificationHelper.cancelIncomingCall(ctx, callId)
-                OngoingCallStore.clear(ctx)
-
-                // Обновляем статус звонка
-                val auth = FirebaseAuth.getInstance()
-                val db = FirebaseFirestore.getInstance()
-                scope.launch {
-                    try {
-                        db.collection("calls").document(callId)
-                            .update(
-                                "status", if (action == ACTION_INCOMING_DECLINE) "declined" else "ended",
-                                "endedAt", com.google.firebase.firestore.FieldValue.serverTimestamp()
-                            )
-                    } catch (e: Exception) {
-                        Log.w("CallActionReceiver", "Failed to update call status", e)
-                    }
-                }
-
-                // Отправляем внутренний broadcast
-                ctx.sendBroadcast(Intent(ACTION_INTERNAL_HANGUP).apply {
-                    putExtra(EXTRA_CALL_ID, callId)
-                })
-
-                // Останавливаем сервис
-                CallService.stop(ctx)
-            }
-
+            ACTION_INCOMING_ACCEPT -> handleAccept(ctx, callId, username, isVideo)
+            ACTION_INCOMING_DECLINE -> handleDecline(ctx, callId)
+            ACTION_HANGUP -> handleHangup(ctx, callId)
             ACTION_TOGGLE_MUTE -> ctx.sendBroadcast(Intent(ACTION_INTERNAL_TOGGLE_MUTE))
             ACTION_TOGGLE_SPEAKER -> ctx.sendBroadcast(Intent(ACTION_INTERNAL_TOGGLE_SPEAKER))
             ACTION_TOGGLE_VIDEO -> ctx.sendBroadcast(Intent(ACTION_INTERNAL_TOGGLE_VIDEO))
+            ACTION_OPEN_CALL -> openCallScreen(ctx, callId, username, isVideo)
+        }
+    }
 
-            ACTION_OPEN_CALL -> {
-                // Открыть экран звонка из шторки
-                val activityIntent = Intent(ctx, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    putExtra("deeplink_callId", callId)
-                    putExtra("deeplink_isVideo", isVideo)
-                    putExtra("deeplink_username", username)
-                }
-                ctx.startActivity(activityIntent)
+    private fun handleAccept(ctx: Context, callId: String, username: String, isVideo: Boolean) {
+        NotificationHelper.cancelIncomingCall(ctx, callId)
+
+        val auth = FirebaseAuth.getInstance()
+        val db = FirebaseFirestore.getInstance()
+        val repo = CallsRepository(auth, db)
+        scope.launch {
+            try {
+                repo.hangupOtherDevices(callId)
+                Log.d("CallActionReceiver", "Hangup other devices successful for $callId")
+            } catch (e: Exception) {
+                Log.w("CallActionReceiver", "hangupOtherDevices failed", e)
+            }
+        }
+
+        CallTrampolineService.start(
+            ctx = ctx,
+            callId = callId,
+            username = username,
+            isVideo = isVideo,
+            openUi = true
+        )
+    }
+
+    private fun handleDecline(ctx: Context, callId: String) {
+        updateCallStatus(callId, "declined")
+        cleanup(ctx, callId)
+    }
+
+    private fun handleHangup(ctx: Context, callId: String) {
+        updateCallStatus(callId, "ended")
+        cleanup(ctx, callId)
+    }
+
+    private fun cleanup(ctx: Context, callId: String) {
+        NotificationHelper.cancelIncomingCall(ctx, callId)
+        OngoingCallStore.clear(ctx)
+        ctx.sendBroadcast(Intent(ACTION_INTERNAL_HANGUP).putExtra(EXTRA_CALL_ID, callId))
+        CallService.stop(ctx)
+    }
+
+    private fun updateCallStatus(callId: String, status: String) {
+        scope.launch {
+            try {
+                val db = FirebaseFirestore.getInstance()
+                db.collection("calls").document(callId)
+                    .update(
+                        mapOf(
+                            "status" to status,
+                            "endedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                        )
+                    )
+                Log.d("CallActionReceiver", "Call $callId status updated to $status")
+            } catch (e: Exception) {
+                Log.w("CallActionReceiver", "Failed to update call status to $status", e)
             }
         }
     }
 
+    private fun openCallScreen(ctx: Context, callId: String, username: String, isVideo: Boolean) {
+        val activityIntent = Intent(ctx, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("deeplink_callId", callId)
+            putExtra("deeplink_isVideo", isVideo)
+            putExtra("deeplink_username", username)
+        }
+        ctx.startActivity(activityIntent)
+    }
+
     companion object {
-        // Экшены из уведомлений
         const val ACTION_INCOMING_ACCEPT = "com.example.messenger_app.ACTION_INCOMING_ACCEPT"
         const val ACTION_INCOMING_DECLINE = "com.example.messenger_app.ACTION_INCOMING_DECLINE"
         const val ACTION_HANGUP = "com.example.messenger_app.ACTION_HANGUP"
         const val ACTION_TOGGLE_MUTE = "com.example.messenger_app.ACTION_TOGGLE_MUTE"
         const val ACTION_TOGGLE_SPEAKER = "com.example.messenger_app.ACTION_TOGGLE_SPEAKER"
         const val ACTION_TOGGLE_VIDEO = "com.example.messenger_app.ACTION_TOGGLE_VIDEO"
-
-        // Внутренние экшены для UI
         const val ACTION_INTERNAL_HANGUP = "com.example.messenger_app.INTERNAL_HANGUP"
         const val ACTION_INTERNAL_TOGGLE_MUTE = "com.example.messenger_app.INTERNAL_TOGGLE_MUTE"
         const val ACTION_INTERNAL_TOGGLE_SPEAKER = "com.example.messenger_app.INTERNAL_TOGGLE_SPEAKER"
         const val ACTION_INTERNAL_TOGGLE_VIDEO = "com.example.messenger_app.INTERNAL_TOGGLE_VIDEO"
-
-        // Открыть экран звонка
         const val ACTION_OPEN_CALL = "com.example.messenger_app.action.OPEN_CALL"
-
-        // Extras
         const val EXTRA_CALL_ID = "extra_call_id"
         const val EXTRA_IS_VIDEO = "extra_is_video"
         const val EXTRA_USERNAME = "extra_username"

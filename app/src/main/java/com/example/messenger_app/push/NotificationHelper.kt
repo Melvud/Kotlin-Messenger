@@ -19,15 +19,16 @@ import kotlin.math.abs
 
 object NotificationHelper {
 
-    const val CHANNEL_INCOMING_CALLS = "incoming_calls"
-    const val CHANNEL_ONGOING_CALLS = "ongoing_calls"
+    const val INCOMING_CALL_CHANNEL_ID = "incoming_calls"
+    const val ONGOING_CALL_CHANNEL_ID = "ongoing_calls"
+    const val TRAMPOLINE_NOTIFICATION_ID = 1002 // New
 
     fun ensureChannels(ctx: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         val incoming = NotificationChannel(
-            CHANNEL_INCOMING_CALLS,
+            INCOMING_CALL_CHANNEL_ID,
             "Incoming calls",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
@@ -43,7 +44,7 @@ object NotificationHelper {
         }
 
         val ongoing = NotificationChannel(
-            CHANNEL_ONGOING_CALLS,
+            ONGOING_CALL_CHANNEL_ID,
             "Ongoing calls",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
@@ -55,6 +56,24 @@ object NotificationHelper {
 
         nm.createNotificationChannel(incoming)
         nm.createNotificationChannel(ongoing)
+    }
+
+    // New function
+    fun createBaseNotification(
+        context: Context,
+        channelId: String,
+        title: String,
+        text: String,
+        ongoing: Boolean = false
+    ): Notification {
+        ensureChannels(context)
+        return NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(R.drawable.ic_call)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(ongoing)
+            .build()
     }
 
     /** Heads-up полноэкранное уведомление для входящего звонка. */
@@ -86,7 +105,7 @@ object NotificationHelper {
         val acceptPi = actionPi(ctx, CallActionReceiver.ACTION_INCOMING_ACCEPT, callId, username, isVideo)
         val declinePi = actionPi(ctx, CallActionReceiver.ACTION_INCOMING_DECLINE, callId, username, isVideo)
 
-        val n = NotificationCompat.Builder(ctx, CHANNEL_INCOMING_CALLS)
+        val n = NotificationCompat.Builder(ctx, INCOMING_CALL_CHANNEL_ID) // Use new constant
             .setSmallIcon(android.R.drawable.stat_sys_phone_call)
             .setContentTitle(if (isVideo) "Видео-звонок" else "Входящий звонок")
             .setContentText(username.ifBlank { "Звонок" })
