@@ -289,22 +289,23 @@ object WebRtcCallManager {
 
         Log.d(TAG, "✅ PeerConnection created")
 
-        // КРИТИЧЕСКИ ВАЖНО: Создаем треки СИНХРОННО до создания offer/answer
+        // ✅ КРИТИЧЕСКИ ВАЖНО: Создаем треки СИНХРОННО до создания offer/answer
         setupAudioTrack()
 
         if (isVideo) {
             createAndStartLocalVideoSync()
         }
 
-        // Небольшая задержка для стабильности
-        mainHandler.postDelayed({
-            if (role == "caller") {
-                Log.d(TAG, "Role=CALLER: creating offer...")
+        // ✅ ИСПРАВЛЕНО: Убрали задержку, создаем offer сразу только для caller
+        if (role == "caller") {
+            // Небольшая задержка чтобы треки точно добавились
+            mainHandler.postDelayed({
+                Log.d(TAG, "Role=CALLER: creating initial offer...")
                 createOffer()
-            } else {
-                Log.d(TAG, "Role=CALLEE: waiting for offer...")
-            }
-        }, 200)
+            }, 100)
+        } else {
+            Log.d(TAG, "Role=CALLEE: waiting for offer...")
+        }
 
         Log.d(TAG, "========================================")
         Log.d(TAG, "✅ START CALL COMPLETE")
@@ -647,13 +648,17 @@ object WebRtcCallManager {
         Log.d(TAG, "📹 TOGGLE VIDEO: $willEnable")
         Log.d(TAG, "========================================")
 
+        // ✅ ИСПРАВЛЕНО: Проверяем что peer существует
+        val p = peer
+        if (p == null) {
+            Log.e(TAG, "❌ Cannot toggle video: peer is null")
+            return
+        }
+
         if (willEnable) {
             if (videoTrack == null) {
                 createAndStartLocalVideoSync()
-                // Renegotiation
-                mainHandler.postDelayed({
-                    triggerRenegotiation()
-                }, 500)
+                triggerRenegotiation()
             } else {
                 videoTrack?.setEnabled(true)
                 _isVideoEnabled.value = true
@@ -663,6 +668,19 @@ object WebRtcCallManager {
             videoTrack?.setEnabled(false)
             _isVideoEnabled.value = false
         }
+    }
+
+    private fun triggerRenegotiation() {
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION")
+        Log.d(TAG, "========================================")
+
+        val p = peer ?: run {
+            Log.e(TAG, "Cannot renegotiate: peer is null")
+            return
+        }
+
+        createOffer()
     }
 
     private fun disposeVideoChain() {
@@ -746,27 +764,6 @@ object WebRtcCallManager {
         _videoUpgradeRequest.value = VideoUpgradeRequest(fromUsername)
     }
 
-    private fun triggerRenegotiation() {
-        Log.d(TAG, "========================================")
-        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION")
-        Log.d(TAG, "========================================")
-
-        val p = peer ?: run {
-            Log.e(TAG, "Cannot renegotiate: peer is null")
-            return
-        }
-
-        val role = currentRole ?: run {
-            Log.e(TAG, "Cannot renegotiate: role is null")
-            return
-        }
-
-        if (role == "caller") {
-            createOffer()
-        } else {
-            Log.d(TAG, "Callee: waiting for renegotiation offer from caller")
-        }
-    }
 
     // ==================== RENDERERS ====================
 
@@ -970,6 +967,7 @@ object WebRtcCallManager {
         Log.d(TAG, "========================================")
         Log.d(TAG, "📥 APPLY REMOTE OFFER")
         Log.d(TAG, "SDP length: ${sdp.length}")
+        Log.d(TAG, "Current signaling state: ${peer?.signalingState()}")
         Log.d(TAG, "========================================")
 
         val p = peer ?: run {
@@ -979,17 +977,30 @@ object WebRtcCallManager {
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdp)
 
+        // ✅ ИСПРАВЛЕНО: Проверяем состояние перед применением
+        val signalingState = p.signalingState()
+
+        if (signalingState == PeerConnection.SignalingState.HAVE_LOCAL_OFFER) {
+            Log.w(TAG, "⚠️ We have local offer, this is a glare situation. Applying remote offer anyway.")
+            // В случае "glare" (оба отправили offer), применяем удаленный offer
+            // WebRTC автоматически разрешит конфликт
+        }
+
         p.setRemoteDescription(object : SdpObserverAdapter() {
             override fun onSetSuccess() {
                 Log.d(TAG, "✅ Remote offer set successfully")
-                remoteDescriptionSet = true
 
-                if (pendingIceCandidates.isNotEmpty()) {
-                    Log.d(TAG, "Adding ${pendingIceCandidates.size} pending ICE candidates")
-                    pendingIceCandidates.forEach { candidate ->
-                        p.addIceCandidate(candidate)
+                // Сбрасываем флаг только если это первый offer
+                if (!remoteDescriptionSet) {
+                    remoteDescriptionSet = true
+
+                    if (pendingIceCandidates.isNotEmpty()) {
+                        Log.d(TAG, "Adding ${pendingIceCandidates.size} pending ICE candidates")
+                        pendingIceCandidates.forEach { candidate ->
+                            p.addIceCandidate(candidate)
+                        }
+                        pendingIceCandidates.clear()
                     }
-                    pendingIceCandidates.clear()
                 }
 
                 createAnswer()
@@ -1060,7 +1071,7 @@ object WebRtcCallManager {
         override fun onSignalingChange(state: PeerConnection.SignalingState?) {
             Log.d(TAG, "📡 Signaling state: $state")
         }
-
+        
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
             Log.d(TAG, "🧊 ICE connection state: $state")
 
@@ -1131,9 +1142,11 @@ object WebRtcCallManager {
         override fun onRenegotiationNeeded() {
             Log.d(TAG, "🔄 onRenegotiationNeeded")
             mainHandler.post {
-                if (currentRole == "caller") {
-                    Log.d(TAG, "Caller: handling renegotiation")
+                if (peer != null && isStarted.get()) {
+                    Log.d(TAG, "Handling renegotiation - creating new offer")
                     createOffer()
+                } else {
+                    Log.w(TAG, "Skipping renegotiation: peer=$peer, started=${isStarted.get()}")
                 }
             }
         }
@@ -1153,6 +1166,7 @@ object WebRtcCallManager {
                     is VideoTrack -> {
                         Log.d(TAG, "📹 Remote VIDEO track received")
 
+                        // Удаляем старый трек если есть
                         if (remoteVideoTrack != null) {
                             try {
                                 val view = remoteRendererRef?.get()
@@ -1166,13 +1180,18 @@ object WebRtcCallManager {
                         track.setEnabled(true)
                         _isRemoteVideoEnabled.value = true
 
-                        val view = remoteRendererRef?.get()
-                        if (view != null) {
-                            attachRemoteSinkTo(view)
-                            Log.d(TAG, "✅ Remote video attached to renderer")
-                        } else {
-                            Log.w(TAG, "⚠️ Remote renderer view is null!")
-                        }
+                        Log.d(TAG, "✅ Remote video track set, enabled: ${track.enabled()}")
+
+                        // ✅ ИСПРАВЛЕНО: Привязываем с небольшой задержкой
+                        mainHandler.postDelayed({
+                            val view = remoteRendererRef?.get()
+                            if (view != null) {
+                                attachRemoteSinkTo(view)
+                                Log.d(TAG, "✅ Remote video attached to renderer")
+                            } else {
+                                Log.w(TAG, "⚠️ Remote renderer view is null!")
+                            }
+                        }, 100)
                     }
 
                     is AudioTrack -> {

@@ -88,7 +88,11 @@ class CallsRepository(
         db.collection("calls").document(callId)
             .update(
                 mapOf(
-                    "offer" to mapOf("type" to type, "sdp" to sdp),
+                    "offer" to mapOf(
+                        "type" to type,
+                        "sdp" to sdp,
+                        "timestamp" to FieldValue.serverTimestamp() // ✅ Добавляем timestamp
+                    ),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
@@ -98,7 +102,11 @@ class CallsRepository(
         db.collection("calls").document(callId)
             .update(
                 mapOf(
-                    "answer" to mapOf("type" to type, "sdp" to sdp),
+                    "answer" to mapOf(
+                        "type" to type,
+                        "sdp" to sdp,
+                        "timestamp" to FieldValue.serverTimestamp() // ✅ Добавляем timestamp
+                    ),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()

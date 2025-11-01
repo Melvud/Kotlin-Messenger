@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -80,7 +79,6 @@ class CallService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "📱 Service onStartCommand: action=${intent?.action}")
 
-        // ✅ КРИТИЧЕСКИ ВАЖНО: НЕМЕДЛЕННО ВЫЗЫВАЕМ startForeground()
         if (intent?.action == null || intent.action != "STOP_RINGBACK") {
             val callId = intent?.getStringExtra("callId") ?: currentCallId ?: "unknown"
             val username = intent?.getStringExtra("username") ?: "Звонок"
@@ -132,17 +130,15 @@ class CallService : Service() {
         try {
             stopRingback()
 
-            mediaPlayer = MediaPlayer().apply {
+            // ✅ ИСПРАВЛЕНО: Используем ringback.mp3 из ресурсов
+            mediaPlayer = MediaPlayer.create(this, R.raw.ringback)?.apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING) // ✅ Правильный usage
                         .build()
                 )
-
-                setDataSource(this@CallService, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
                 isLooping = true
-                prepare()
                 start()
             }
 
@@ -172,7 +168,6 @@ class CallService : Service() {
         stopRingback()
         OngoingCallStore.clear(this)
 
-        // ✅ БЕЗОПАСНОЕ УДАЛЕНИЕ FOREGROUND
         try {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
@@ -184,20 +179,17 @@ class CallService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ════════════════════════════════════════════════════════════
-    //                     NOTIFICATION
-    // ════════════════════════════════════════════════════════════
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Активный звонок",
-                NotificationManager.IMPORTANCE_HIGH
+                NotificationManager.IMPORTANCE_LOW // ✅ НИЗКИЙ приоритет - не показывается на экране
             ).apply {
                 description = "Уведомления для активных звонков"
-                setSound(null, null)
-                enableVibration(false)
+                setSound(null, null) // ✅ Без звука
+                enableVibration(false) // ✅ Без вибрации
+                setShowBadge(false) // ✅ Без бейджа
             }
 
             val manager = getSystemService(NotificationManager::class.java)
@@ -233,19 +225,20 @@ class CallService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // ✅ ИСПРАВЛЕНО: Убрали setFullScreenIntent - не показывается на экране
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(if (isVideo) "Видеозвонок" else "Звонок")
             .setContentText(username)
             .setSmallIcon(R.drawable.ic_call)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setSound(null)
-            .setVibrate(null)
+            .setPriority(NotificationCompat.PRIORITY_LOW) // ✅ НИЗКИЙ приоритет
+            .setSound(null) // ✅ Без звука
+            .setVibrate(null) // ✅ Без вибрации
+            .setSilent(true) // ✅ Тихое уведомление
             .addAction(R.drawable.ic_mic, "Микрофон", mutePending)
             .addAction(R.drawable.ic_speaker, "Динамик", speakerPending)
             .addAction(R.drawable.ic_hangup, "Завершить", hangupPending)
-            .setFullScreenIntent(hangupPending, true)
             .build()
     }
 }

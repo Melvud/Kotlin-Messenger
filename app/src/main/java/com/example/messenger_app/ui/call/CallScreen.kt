@@ -205,7 +205,7 @@ fun CallScreen(
             WebRtcCallManager.signalingDelegate = null
         }
     }
-
+    var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
     // ==================== FIRESTORE ====================
 
     DisposableEffect(Unit) {
@@ -226,19 +226,52 @@ fun CallScreen(
                 }
             }
 
+            val offerTimestamp = (data["offer"] as? Map<*, *>)?.get("timestamp") as? com.google.firebase.Timestamp
+
             if (role == "callee") {
-                val offer = (data["offer"] as? Map<*, *>)?.get("sdp") as? String
-                if (!offer.isNullOrBlank() && !offerApplied.value) {
-                    Log.d("CallScreen", "📥 Applying OFFER")
+                val offerMap = data["offer"] as? Map<*, *>
+                val offer = offerMap?.get("sdp") as? String
+                val offerTimestamp = offerMap?.get("timestamp") as? com.google.firebase.Timestamp
+
+                if (!offer.isNullOrBlank() && offerTimestamp != null) {
+                    val offerTime = offerTimestamp.toDate().time
+
+                    // Применяем offer только если это новый offer
+                    if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
+                        Log.d("CallScreen", "📥 New/Updated offer received at $offerTime, applying...")
+                        lastProcessedOfferTime = offerTime
+                        WebRtcCallManager.applyRemoteOffer(offer)
+                    } else {
+                        Log.d("CallScreen", "⏭️ Skipping old offer (already processed)")
+                    }
+                } else if (!offer.isNullOrBlank() && !offerApplied.value) {
+                    // Fallback для старых звонков без timestamp
+                    Log.d("CallScreen", "📥 Applying initial OFFER (no timestamp)")
                     offerApplied.value = true
                     WebRtcCallManager.applyRemoteOffer(offer)
                 }
             }
 
             if (role == "caller") {
-                val answer = (data["answer"] as? Map<*, *>)?.get("sdp") as? String
-                if (!answer.isNullOrBlank() && !answerApplied.value) {
-                    Log.d("CallScreen", "📥 Applying ANSWER")
+                val answerMap = data["answer"] as? Map<*, *>
+                val answer = answerMap?.get("sdp") as? String
+                val answerTimestamp = answerMap?.get("timestamp") as? com.google.firebase.Timestamp
+
+                if (!answer.isNullOrBlank() && answerTimestamp != null) {
+                    val answerTime = answerTimestamp.toDate().time
+
+                    // Применяем answer только если это новый answer
+                    if (lastProcessedOfferTime == null || answerTime > lastProcessedOfferTime!!) {
+                        Log.d("CallScreen", "📥 New/Updated answer received at $answerTime, applying...")
+                        lastProcessedOfferTime = answerTime
+                        WebRtcCallManager.applyRemoteAnswer(answer)
+                        CallService.stopRingback(context)
+                    } else {
+                        Log.d("CallScreen", "⏭️ Skipping old answer (already processed)")
+                    }
+                } else if (!answer.isNullOrBlank() && !answerApplied.value) {
+                    // Fallback для старых звонков без timestamp
+                    Log.d("CallScreen", "📥 Applying initial ANSWER (no timestamp)")
                     answerApplied.value = true
                     WebRtcCallManager.applyRemoteAnswer(answer)
                     CallService.stopRingback(context)
@@ -294,7 +327,20 @@ fun CallScreen(
             iceReg.remove()
         }
     }
+    // ==================== REMOTE VIDEO TRACKING ====================
 
+// Отслеживаем изменения remote video
+    LaunchedEffect(isRemoteVideoEnabled) {
+        Log.d("CallScreen", "========================================")
+        Log.d("CallScreen", "📹 Remote video enabled: $isRemoteVideoEnabled")
+        Log.d("CallScreen", "========================================")
+
+        if (isRemoteVideoEnabled) {
+            // Даем время для привязки renderer
+            delay(300)
+            Log.d("CallScreen", "Remote video should be visible now")
+        }
+    }
     // ==================== BROADCAST ====================
 
     DisposableEffect(Unit) {
@@ -443,28 +489,23 @@ private fun ModernCallUI(
 ) {
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
 
-    // Определяем что показывать
-    val hasAnyVideo = isLocalVideoEnabled || isRemoteVideoEnabled
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF4A90E2), // Мягкий синий
-                        Color(0xFF7B68EE), // Мягкий фиолетовый
-                        Color(0xFF9B59B6)  // Мягкий пурпурный
+                        Color(0xFF4A90E2),
+                        Color(0xFF7B68EE),
+                        Color(0xFF9B59B6)
                     )
                 )
             )
     ) {
         // ═══ ГЛАВНЫЙ КОНТЕНТ ═══
-        Box(
-            modifier = Modifier.fillMaxSize()
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
             when {
-                // Если есть удаленное видео - показываем его на весь экран
+                // ✅ ПРИОРИТЕТ 1: Если есть удаленное видео - показываем его на весь экран
                 isRemoteVideoEnabled && !videoSwapped -> {
                     RemoteVideoFullScreen()
                     if (isLocalVideoEnabled) {
@@ -478,12 +519,7 @@ private fun ModernCallUI(
                     }
                 }
 
-                // Если есть локальное видео и удаленного нет - показываем локальное
-                isLocalVideoEnabled && !isRemoteVideoEnabled && !videoSwapped -> {
-                    LocalVideoFullScreen()
-                }
-
-                // Если своппнуто - наоборот
+                // ✅ ПРИОРИТЕТ 2: Если своппнуто - показываем локальное на весь экран
                 isLocalVideoEnabled && videoSwapped -> {
                     LocalVideoFullScreen()
                     if (isRemoteVideoEnabled) {
@@ -497,11 +533,12 @@ private fun ModernCallUI(
                     }
                 }
 
-                isRemoteVideoEnabled && videoSwapped -> {
-                    RemoteVideoFullScreen()
+                // ✅ ПРИОРИТЕТ 3: Если есть только локальное видео
+                isLocalVideoEnabled && !isRemoteVideoEnabled -> {
+                    LocalVideoFullScreen()
                 }
 
-                // Если видео нет совсем - показываем красивый аудио экран
+                // ✅ ПРИОРИТЕТ 4: Если видео нет совсем - показываем аудио экран
                 else -> {
                     ModernAudioContent(
                         peerName = peerName,
