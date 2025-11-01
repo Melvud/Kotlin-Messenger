@@ -756,6 +756,11 @@ object WebRtcCallManager {
             Log.d(TAG, "✅ Renderer initialized: overlay=$overlay, mirror=$mirror")
         }
 
+        // ℹ️ MIRRORING EXPLANATION:
+        // The setMirror() method ONLY affects the local display, NOT the transmitted video.
+        // - Local video preview: mirror=true (user sees themselves like in a mirror)
+        // - Remote video display: mirror=false (see remote user naturally)
+        // - Transmitted video: NEVER mirrored (WebRTC handles this automatically)
         view.setMirror(mirror)
     }
 
