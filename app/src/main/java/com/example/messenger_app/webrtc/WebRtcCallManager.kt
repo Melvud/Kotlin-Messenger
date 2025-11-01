@@ -113,6 +113,7 @@ object WebRtcCallManager {
     private var videoCapturer: CameraVideoCapturer? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var remoteVideoTrack: VideoTrack? = null
+    private var remoteVideoCheckRunnable: Runnable? = null
 
     private var currentCallId: String? = null
     private var currentRole: String? = null
@@ -323,6 +324,7 @@ object WebRtcCallManager {
 
         cancelCallTimeout()
         cancelReconnect()
+        stopMonitoringRemoteVideoTrack()
 
         try {
             audioTrack?.setEnabled(false)
@@ -1164,9 +1166,12 @@ object WebRtcCallManager {
 
                         remoteVideoTrack = track
                         track.setEnabled(true)
-                        _isRemoteVideoEnabled.value = true
+                        _isRemoteVideoEnabled.value = track.enabled()
 
                         Log.d(TAG, "✅ Remote video track set, enabled: ${track.enabled()}")
+
+                        // Start monitoring the track state
+                        startMonitoringRemoteVideoTrack()
 
                         mainHandler.postDelayed({
                             val view = remoteRendererRef?.get()
@@ -1247,6 +1252,43 @@ object WebRtcCallManager {
         timeoutRunnable?.let {
             mainHandler.removeCallbacks(it)
             timeoutRunnable = null
+        }
+    }
+
+    private fun startMonitoringRemoteVideoTrack() {
+        stopMonitoringRemoteVideoTrack()
+        
+        remoteVideoCheckRunnable = object : Runnable {
+            override fun run() {
+                val track = remoteVideoTrack
+                if (track != null && isStarted.get()) {
+                    val isEnabled = track.enabled()
+                    val currentState = _isRemoteVideoEnabled.value
+                    
+                    if (isEnabled != currentState) {
+                        Log.d(TAG, "📹 Remote video track state changed: $isEnabled")
+                        _isRemoteVideoEnabled.value = isEnabled
+                    }
+                    
+                    // Continue monitoring
+                    mainHandler.postDelayed(this, 500)
+                } else if (track == null && _isRemoteVideoEnabled.value) {
+                    // Track was removed
+                    Log.d(TAG, "📹 Remote video track removed")
+                    _isRemoteVideoEnabled.value = false
+                }
+            }
+        }
+        
+        mainHandler.post(remoteVideoCheckRunnable!!)
+        Log.d(TAG, "✅ Started monitoring remote video track")
+    }
+
+    private fun stopMonitoringRemoteVideoTrack() {
+        remoteVideoCheckRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            remoteVideoCheckRunnable = null
+            Log.d(TAG, "🛑 Stopped monitoring remote video track")
         }
     }
 
