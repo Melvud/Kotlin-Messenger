@@ -254,9 +254,10 @@ class MainActivity : ComponentActivity() {
 
                             // Проверяем разрешения перед принятием звонка
                             if (!checkCallPermissions(includeCamera = isVideo)) {
-                                android.util.Log.d("MainActivity", "Permissions not granted, requesting and saving intent")
-                                pendingIntent = i  // Сохраняем намерение для обработки после получения разрешений
-                                requestCallPermissions(includeCamera = isVideo)
+                                android.util.Log.d("MainActivity", "Permissions not granted, saving intent for later")
+                                // ✅ FIX: Don't request permissions again if already requested in onCreate
+                                // Just save the intent and wait for the permission callback
+                                pendingIntent = i
                                 return
                             }
 
