@@ -1174,9 +1174,11 @@ object WebRtcCallManager {
 
                         remoteVideoTrack = track
                         track.setEnabled(true)
-                        _isRemoteVideoEnabled.value = track.enabled()
+                        
+                        val trackEnabled = track.enabled()
+                        _isRemoteVideoEnabled.value = trackEnabled
 
-                        Log.d(TAG, "✅ Remote video track set, enabled: ${track.enabled()}")
+                        Log.d(TAG, "✅ Remote video track set, enabled: $trackEnabled")
 
                         // Start monitoring the track state
                         startMonitoringRemoteVideoTrack()
@@ -1280,6 +1282,11 @@ object WebRtcCallManager {
      */
     private fun startMonitoringRemoteVideoTrack() {
         // Must be called on main thread
+        
+        // Stop any existing monitoring first
+        if (remoteVideoCheckRunnable != null) {
+            Log.w(TAG, "⚠️ Monitoring was already active, stopping previous instance")
+        }
         stopMonitoringRemoteVideoTrack()
         
         val runnable = object : Runnable {
@@ -1299,7 +1306,7 @@ object WebRtcCallManager {
                     val currentState = _isRemoteVideoEnabled.value
                     
                     if (isEnabled != currentState) {
-                        Log.d(TAG, "📹 Remote video track state changed: $isEnabled")
+                        Log.d(TAG, "📹 Remote video track state changed: $currentState -> $isEnabled")
                         _isRemoteVideoEnabled.value = isEnabled
                     }
                     
