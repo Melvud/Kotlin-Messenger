@@ -813,16 +813,8 @@ private fun LocalVideoPip(modifier: Modifier) {
 @Composable
 private fun RemoteVideoFullScreen() {
     var rendererReady by remember { mutableStateOf(false) }
-    var currentRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
 
     Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen (recomposition)")
-
-    DisposableEffect(Unit) {
-        Log.d("RemoteVideoFullScreen", "📹 DisposableEffect: entered")
-        onDispose {
-            Log.d("RemoteVideoFullScreen", "📹 DisposableEffect: onDispose - cleaning up renderer")
-        }
-    }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -832,7 +824,6 @@ private fun RemoteVideoFullScreen() {
                 // ✅ FIX: mirror=false для удаленного видео!
                 WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
                 rendererReady = true
-                currentRenderer = this
             }
         },
         update = { view ->

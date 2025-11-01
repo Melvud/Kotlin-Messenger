@@ -1265,7 +1265,7 @@ object WebRtcCallManager {
     private fun startMonitoringRemoteVideoTrack() {
         stopMonitoringRemoteVideoTrack()
         
-        remoteVideoCheckRunnable = object : Runnable {
+        val runnable = object : Runnable {
             override fun run() {
                 val track = remoteVideoTrack
                 if (track != null && isStarted.get()) {
@@ -1291,7 +1291,8 @@ object WebRtcCallManager {
             }
         }
         
-        mainHandler.post(remoteVideoCheckRunnable!!)
+        remoteVideoCheckRunnable = runnable
+        mainHandler.post(runnable)
         Log.d(TAG, "✅ Started monitoring remote video track")
     }
 
