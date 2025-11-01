@@ -154,6 +154,10 @@ fun CallScreen(
                                 repo.setAnswer(callId, sdp.description, "answer")
                                 Log.d("CallScreen", "✅ Answer sent to Firestore (role=$role)")
                             }
+                            org.webrtc.SessionDescription.Type.PRANSWER -> {
+                                // Provisional answer - not used in our signaling, ignore
+                                Log.d("CallScreen", "⚠️ Provisional answer received, ignoring")
+                            }
                             else -> {
                                 Log.w("CallScreen", "⚠️ Unknown SDP type: ${sdp.type}")
                             }
