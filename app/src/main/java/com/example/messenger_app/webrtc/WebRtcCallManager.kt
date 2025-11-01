@@ -51,6 +51,7 @@ object WebRtcCallManager {
     private const val CALL_TIMEOUT_MS = 45_000L
     private const val RECONNECT_ATTEMPTS = 5
     private const val RECONNECT_DELAY_MS = 2_000L
+    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 500L
     private const val STREAM_ID = "ANTIMAX_STREAM"
 
     private val _isMuted = MutableStateFlow(false)
@@ -113,6 +114,7 @@ object WebRtcCallManager {
     private var videoCapturer: CameraVideoCapturer? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var remoteVideoTrack: VideoTrack? = null
+    private var remoteVideoCheckRunnable: Runnable? = null
 
     private var currentCallId: String? = null
     private var currentRole: String? = null
@@ -323,6 +325,7 @@ object WebRtcCallManager {
 
         cancelCallTimeout()
         cancelReconnect()
+        stopMonitoringRemoteVideoTrack()
 
         try {
             audioTrack?.setEnabled(false)
@@ -647,7 +650,7 @@ object WebRtcCallManager {
             return
         }
 
-        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION")
+        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION (role=$currentRole)")
 
         val p = peer ?: run {
             Log.e(TAG, "Cannot renegotiate: peer is null")
@@ -658,6 +661,8 @@ object WebRtcCallManager {
         offerCreated.set(false)
 
         mainHandler.postDelayed({
+            // For mid-call changes (like toggling video), the person who made the change
+            // should create an offer regardless of their initial role
             createOffer()
         }, 100)
     }
@@ -752,6 +757,11 @@ object WebRtcCallManager {
             Log.d(TAG, "✅ Renderer initialized: overlay=$overlay, mirror=$mirror")
         }
 
+        // ℹ️ MIRRORING EXPLANATION:
+        // The setMirror() method ONLY affects the local display, NOT the transmitted video.
+        // - Local video preview: mirror=true (user sees themselves like in a mirror)
+        // - Remote video display: mirror=false (see remote user naturally)
+        // - Transmitted video: NEVER mirrored (WebRTC handles this automatically)
         view.setMirror(mirror)
     }
 
@@ -1164,9 +1174,14 @@ object WebRtcCallManager {
 
                         remoteVideoTrack = track
                         track.setEnabled(true)
-                        _isRemoteVideoEnabled.value = true
+                        
+                        val trackEnabled = track.enabled()
+                        _isRemoteVideoEnabled.value = trackEnabled
 
-                        Log.d(TAG, "✅ Remote video track set, enabled: ${track.enabled()}")
+                        Log.d(TAG, "✅ Remote video track set, enabled: $trackEnabled")
+
+                        // Start monitoring the track state
+                        startMonitoringRemoteVideoTrack()
 
                         mainHandler.postDelayed({
                             val view = remoteRendererRef?.get()
@@ -1247,6 +1262,92 @@ object WebRtcCallManager {
         timeoutRunnable?.let {
             mainHandler.removeCallbacks(it)
             timeoutRunnable = null
+        }
+    }
+
+    /**
+     * Starts monitoring the remote video track state.
+     * 
+     * This function creates a recurring task that checks the remote video track's enabled state
+     * every REMOTE_VIDEO_CHECK_INTERVAL_MS. When the state changes, it updates the
+     * _isRemoteVideoEnabled StateFlow, which triggers UI recomposition.
+     * 
+     * Thread Safety: Must be called on the main thread. Since this is a private method and all
+     * call sites are controlled (onAddTrack), thread safety is ensured by design. The monitoring
+     * runnable always executes on the main thread via mainHandler.
+     * 
+     * Lifecycle: Monitoring automatically stops when:
+     * - The call ends (isStarted becomes false)
+     * - The remote video track is removed (track becomes null)
+     * - stopMonitoringRemoteVideoTrack() is called explicitly
+     * 
+     * Note: It's safe to call this multiple times - any existing monitoring will be stopped first.
+     * The anonymous Runnable is intentional - monitoring is started once per call, so the overhead
+     * of object creation is negligible.
+     */
+    private fun startMonitoringRemoteVideoTrack() {
+        // Stop any existing monitoring first (safe to call multiple times)
+        stopMonitoringRemoteVideoTrack()
+        
+        val runnable = object : Runnable {
+            override fun run() {
+                // This runnable is always executed on main thread via mainHandler
+                
+                // Stop monitoring if call has ended
+                if (!isStarted.get()) {
+                    Log.d(TAG, "🛑 Call ended, stopping remote video monitoring")
+                    remoteVideoCheckRunnable = null
+                    return
+                }
+                
+                val track = remoteVideoTrack
+                if (track != null) {
+                    val isEnabled = track.enabled()
+                    val currentState = _isRemoteVideoEnabled.value
+                    
+                    if (isEnabled != currentState) {
+                        Log.d(TAG, "📹 Remote video track state changed: $currentState -> $isEnabled")
+                        _isRemoteVideoEnabled.value = isEnabled
+                    }
+                    
+                    // Continue monitoring
+                    mainHandler.postDelayed(this, REMOTE_VIDEO_CHECK_INTERVAL_MS)
+                } else {
+                    // Track was removed
+                    if (_isRemoteVideoEnabled.value) {
+                        Log.d(TAG, "📹 Remote video track removed")
+                        _isRemoteVideoEnabled.value = false
+                    }
+                    // Stop monitoring since track is gone
+                    remoteVideoCheckRunnable = null
+                }
+            }
+        }
+        
+        remoteVideoCheckRunnable = runnable
+        mainHandler.post(runnable)
+        Log.d(TAG, "✅ Started monitoring remote video track")
+    }
+
+    /**
+     * Stops monitoring the remote video track state.
+     * 
+     * This function cancels any pending monitoring callbacks and cleans up the runnable reference.
+     * Safe to call multiple times or when monitoring is not active.
+     * 
+     * Thread Safety: Must be called on the main thread. Uses mainHandler.removeCallbacks
+     * which is thread-safe when called from the correct thread.
+     * 
+     * Should be called when:
+     * - The call ends (in endCallInternal)
+     * - Before starting new monitoring (in startMonitoringRemoteVideoTrack)
+     * - When explicitly stopping the call
+     */
+    private fun stopMonitoringRemoteVideoTrack() {
+        remoteVideoCheckRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            remoteVideoCheckRunnable = null
+            Log.d(TAG, "🛑 Stopped monitoring remote video track")
         }
     }
 

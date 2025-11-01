@@ -756,9 +756,12 @@ private fun ModernCallUI(
 private fun LocalVideoFullScreen() {
     var rendererReady by remember { mutableStateOf(false) }
 
+    Log.d("LocalVideoFullScreen", "📹 Rendering local video fullscreen (recomposition)")
+
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
+            Log.d("LocalVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
                 WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = false)
                 rendererReady = true
@@ -766,6 +769,7 @@ private fun LocalVideoFullScreen() {
         },
         update = { view ->
             if (rendererReady) {
+                Log.d("LocalVideoFullScreen", "📹 Binding local renderer (update)")
                 WebRtcCallManager.bindLocalRenderer(view)
             }
         }
@@ -777,6 +781,8 @@ private fun LocalVideoFullScreen() {
 private fun LocalVideoPip(modifier: Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
+    Log.d("LocalVideoPip", "📹 Rendering local video PiP (recomposition)")
+
     Surface(
         modifier = modifier.size(120.dp, 160.dp),
         shape = RoundedCornerShape(20.dp),
@@ -786,6 +792,7 @@ private fun LocalVideoPip(modifier: Modifier) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
+                Log.d("LocalVideoPip", "📹 Creating renderer (factory)")
                 SurfaceViewRenderer(ctx).apply {
                     // ✅ FIX: mirror=true для локального видео
                     WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
@@ -794,6 +801,7 @@ private fun LocalVideoPip(modifier: Modifier) {
             },
             update = { view ->
                 if (rendererReady) {
+                    Log.d("LocalVideoPip", "📹 Binding local renderer (update)")
                     WebRtcCallManager.bindLocalRenderer(view)
                 }
             }
@@ -806,12 +814,12 @@ private fun LocalVideoPip(modifier: Modifier) {
 private fun RemoteVideoFullScreen() {
     var rendererReady by remember { mutableStateOf(false) }
 
-    Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen")
+    Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen (recomposition)")
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
-            Log.d("RemoteVideoFullScreen", "📹 Creating renderer")
+            Log.d("RemoteVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
                 // ✅ FIX: mirror=false для удаленного видео!
                 WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
@@ -820,7 +828,7 @@ private fun RemoteVideoFullScreen() {
         },
         update = { view ->
             if (rendererReady) {
-                Log.d("RemoteVideoFullScreen", "📹 Binding remote renderer")
+                Log.d("RemoteVideoFullScreen", "📹 Binding remote renderer (update)")
                 WebRtcCallManager.bindRemoteRenderer(view)
             }
         }
