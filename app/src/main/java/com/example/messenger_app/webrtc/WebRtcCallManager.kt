@@ -51,6 +51,7 @@ object WebRtcCallManager {
     private const val CALL_TIMEOUT_MS = 45_000L
     private const val RECONNECT_ATTEMPTS = 5
     private const val RECONNECT_DELAY_MS = 2_000L
+    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 500L
     private const val STREAM_ID = "ANTIMAX_STREAM"
 
     private val _isMuted = MutableStateFlow(false)
@@ -1267,8 +1268,15 @@ object WebRtcCallManager {
         
         val runnable = object : Runnable {
             override fun run() {
+                // Stop monitoring if call has ended
+                if (!isStarted.get()) {
+                    Log.d(TAG, "🛑 Call ended, stopping remote video monitoring")
+                    remoteVideoCheckRunnable = null
+                    return
+                }
+                
                 val track = remoteVideoTrack
-                if (track != null && isStarted.get()) {
+                if (track != null) {
                     val isEnabled = track.enabled()
                     val currentState = _isRemoteVideoEnabled.value
                     
@@ -1280,13 +1288,15 @@ object WebRtcCallManager {
                     }
                     
                     // Continue monitoring
-                    mainHandler.postDelayed(this, 500)
-                } else if (track == null && _isRemoteVideoEnabled.value) {
+                    mainHandler.postDelayed(this, REMOTE_VIDEO_CHECK_INTERVAL_MS)
+                } else if (_isRemoteVideoEnabled.value) {
                     // Track was removed
                     Log.d(TAG, "📹 Remote video track removed")
                     mainHandler.post {
                         _isRemoteVideoEnabled.value = false
                     }
+                    // Stop monitoring since track is gone
+                    remoteVideoCheckRunnable = null
                 }
             }
         }
