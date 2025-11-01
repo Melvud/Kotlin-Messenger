@@ -1263,6 +1263,21 @@ object WebRtcCallManager {
         }
     }
 
+    /**
+     * Starts monitoring the remote video track state.
+     * 
+     * This function creates a recurring task that checks the remote video track's enabled state
+     * every REMOTE_VIDEO_CHECK_INTERVAL_MS. When the state changes, it updates the
+     * _isRemoteVideoEnabled StateFlow, which triggers UI recomposition.
+     * 
+     * Thread Safety: Must be called on the main thread. The monitoring runnable always executes
+     * on the main thread via mainHandler, ensuring thread-safe state updates.
+     * 
+     * Lifecycle: Monitoring automatically stops when:
+     * - The call ends (isStarted becomes false)
+     * - The remote video track is removed (track becomes null)
+     * - stopMonitoringRemoteVideoTrack() is called explicitly
+     */
     private fun startMonitoringRemoteVideoTrack() {
         // Must be called on main thread
         stopMonitoringRemoteVideoTrack()
@@ -1307,6 +1322,20 @@ object WebRtcCallManager {
         Log.d(TAG, "✅ Started monitoring remote video track")
     }
 
+    /**
+     * Stops monitoring the remote video track state.
+     * 
+     * This function cancels any pending monitoring callbacks and cleans up the runnable reference.
+     * Safe to call multiple times or when monitoring is not active.
+     * 
+     * Thread Safety: Must be called on the main thread. Uses mainHandler.removeCallbacks
+     * which is thread-safe when called from the correct thread.
+     * 
+     * Should be called when:
+     * - The call ends (in endCallInternal)
+     * - Before starting new monitoring (in startMonitoringRemoteVideoTrack)
+     * - When explicitly stopping the call
+     */
     private fun stopMonitoringRemoteVideoTrack() {
         remoteVideoCheckRunnable?.let {
             mainHandler.removeCallbacks(it)
