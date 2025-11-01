@@ -901,10 +901,12 @@ object WebRtcCallManager {
                     return
                 }
 
+                // ✅ FIX: When creating an offer, always use "actpass" setup, regardless of initial role
+                // This is correct for both initial offers and renegotiation offers
                 val fixedSdp = fixSdpSetup(desc.description, "caller")
                 val fixedDesc = SessionDescription(desc.type, fixedSdp)
 
-                Log.d(TAG, "✅ Offer created, setting local description")
+                Log.d(TAG, "✅ Offer created (role=$currentRole), setting local description")
 
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
@@ -929,7 +931,7 @@ object WebRtcCallManager {
     }
 
     private fun createAnswer() {
-        Log.d(TAG, "Creating answer...")
+        Log.d(TAG, "Creating answer (role=$currentRole)...")
 
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
@@ -944,6 +946,8 @@ object WebRtcCallManager {
                     return
                 }
 
+                // ✅ FIX: When creating an answer, always use "active" setup
+                // This is correct for both initial answers and renegotiation answers
                 val fixedSdp = fixSdpSetup(desc.description, "callee")
                 val fixedDesc = SessionDescription(desc.type, fixedSdp)
 
