@@ -100,6 +100,7 @@ fun CallScreen(
         (nowMs - callStartedAtMs!!).coerceAtLeast(0)
     } else 0L
 
+    // ✅ FIX: Set signaling delegate BEFORE starting the call to ensure offer/answer can be sent
     DisposableEffect(Unit) {
         Log.d("CallScreen", """
             ════════════════════════════════════════
@@ -114,29 +115,7 @@ fun CallScreen(
         NotificationHelper.cancelIncomingCall(context, callId)
         WebRtcCallManager.init(context)
 
-        WebRtcCallManager.startCall(
-            callId = callId,
-            isVideo = isVideo,
-            playRingback = playRingback,
-            role = role
-        )
-
-        CallService.start(
-            ctx = context,
-            callId = callId,
-            username = peerName,
-            isVideo = isVideo,
-            openUi = false,
-            playRingback = playRingback
-        )
-
-        onDispose {
-            Log.d("CallScreen", "🧹 CallScreen disposed")
-        }
-    }
-
-    // ✅ FIX: Добавлен callback onCallStarted
-    DisposableEffect(Unit) {
+        // Set signaling delegate BEFORE startCall() so offer/answer can be sent immediately
         WebRtcCallManager.signalingDelegate = object : WebRtcCallManager.SignalingDelegate {
 
             override fun onLocalDescription(callId: String, sdp: org.webrtc.SessionDescription) {
@@ -242,8 +221,26 @@ fun CallScreen(
             }
         }
 
+        // Now start the call - the delegate is already set and ready to handle callbacks
+        WebRtcCallManager.startCall(
+            callId = callId,
+            isVideo = isVideo,
+            playRingback = playRingback,
+            role = role
+        )
+
+        CallService.start(
+            ctx = context,
+            callId = callId,
+            username = peerName,
+            isVideo = isVideo,
+            openUi = false,
+            playRingback = playRingback
+        )
+
         onDispose {
             WebRtcCallManager.signalingDelegate = null
+            Log.d("CallScreen", "🧹 CallScreen disposed")
         }
     }
 
