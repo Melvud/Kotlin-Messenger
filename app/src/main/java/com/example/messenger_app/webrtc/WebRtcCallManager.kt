@@ -1264,10 +1264,13 @@ object WebRtcCallManager {
     }
 
     private fun startMonitoringRemoteVideoTrack() {
+        // Must be called on main thread
         stopMonitoringRemoteVideoTrack()
         
         val runnable = object : Runnable {
             override fun run() {
+                // This runnable is always executed on main thread via mainHandler
+                
                 // Stop monitoring if call has ended
                 if (!isStarted.get()) {
                     Log.d(TAG, "🛑 Call ended, stopping remote video monitoring")
@@ -1282,17 +1285,15 @@ object WebRtcCallManager {
                     
                     if (isEnabled != currentState) {
                         Log.d(TAG, "📹 Remote video track state changed: $isEnabled")
-                        mainHandler.post {
-                            _isRemoteVideoEnabled.value = isEnabled
-                        }
+                        _isRemoteVideoEnabled.value = isEnabled
                     }
                     
                     // Continue monitoring
                     mainHandler.postDelayed(this, REMOTE_VIDEO_CHECK_INTERVAL_MS)
-                } else if (_isRemoteVideoEnabled.value) {
+                } else {
                     // Track was removed
-                    Log.d(TAG, "📹 Remote video track removed")
-                    mainHandler.post {
+                    if (_isRemoteVideoEnabled.value) {
+                        Log.d(TAG, "📹 Remote video track removed")
                         _isRemoteVideoEnabled.value = false
                     }
                     // Stop monitoring since track is gone
