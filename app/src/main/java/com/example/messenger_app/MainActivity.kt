@@ -255,6 +255,7 @@ class MainActivity : ComponentActivity() {
                     val deepId = i.getStringExtra("deeplink_callId")
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
                     val deepUser = i.getStringExtra("deeplink_username") ?: ""
+                    val deepPlayRingback = i.getBooleanExtra("deeplink_playRingback", true)
 
                     val openChat = action == "open_chat"
                     val chatIdToOpen = i.getStringExtra("chatId")
@@ -312,8 +313,8 @@ class MainActivity : ComponentActivity() {
 
                         // Deep link для звонка
                         !deepId.isNullOrBlank() -> {
-                            android.util.Log.d("MainActivity", "Deep link call: callId=$deepId, isVideo=$deepIsVideo")
-                            navController.navigate(Routes.callRoute(deepId, deepIsVideo, deepUser)) {
+                            android.util.Log.d("MainActivity", "Deep link call: callId=$deepId, isVideo=$deepIsVideo, playRingback=$deepPlayRingback")
+                            navController.navigate(Routes.callRoute(deepId, deepIsVideo, deepUser, deepPlayRingback)) {
                                 launchSingleTop = true
                             }
                         }
