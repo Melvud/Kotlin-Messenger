@@ -156,31 +156,6 @@ fun ChatScreen(
         }
     }
 
-// ДОПОЛНИТЕЛЬНО: Помечаем сообщения как прочитанные при изменении списка
-// (на случай если новые сообщения пришли пока чат активен)
-    LaunchedEffect(messages) {
-        if (actualChatId != null && actualChatId!!.isNotBlank() && messages.isNotEmpty()) {
-            delay(500) // Даем пользователю время увидеть сообщения
-
-            val unreadMessages = messages
-                .filter { msg ->
-                    msg.senderId != myUid &&
-                            (msg.status == MessageStatus.SENT || msg.status == MessageStatus.DELIVERED)
-                }
-                .map { it.id }
-
-            if (unreadMessages.isNotEmpty()) {
-                try {
-                    Log.d("ChatScreen", "Marking ${unreadMessages.size} messages as read")
-                    chatRepo.markMessagesAsRead(actualChatId!!, unreadMessages)
-                } catch (e: Exception) {
-                    Log.e("ChatScreen", "Error marking messages as read", e)
-                    e.printStackTrace()
-                }
-            }
-        }
-    }
-
 // Обработка печати (без изменений, но добавим проверку)
     var typingJob: kotlinx.coroutines.Job? by remember { mutableStateOf(null) }
     LaunchedEffect(messageText, actualChatId) {

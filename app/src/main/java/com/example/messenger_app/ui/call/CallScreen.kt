@@ -1,18 +1,15 @@
 package com.example.messenger_app.ui.call
 
-import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
-import android.view.View
-import android.view.ViewGroup
-import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -24,27 +21,27 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import com.example.messenger_app.data.CallsRepository
 import com.example.messenger_app.push.CallActionReceiver
 import com.example.messenger_app.push.CallService
 import com.example.messenger_app.push.NotificationHelper
 import com.example.messenger_app.push.OngoingCallStore
-import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentChange
@@ -57,15 +54,8 @@ import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
 
 /**
- * УЛУЧШЕННЫЙ CallScreen с:
- * - Современным Material Design 3 UI
- * - Автоматическим переподключением
- * - Индикаторами состояния и качества
- * - Диалогом перехода на видео
- * - Анимациями и эффектами
+ * УЛУЧШЕННЫЙ CallScreen с современным красивым дизайном
  */
-// ИСПРАВЛЕНИЕ: Замените начало CallScreen функции (до DisposableEffect)
-
 @Composable
 fun CallScreen(
     callId: String,
@@ -75,10 +65,9 @@ fun CallScreen(
     otherUsername: String? = null
 ) {
     val context = LocalContext.current
-
     val role = remember(playRingback) { if (playRingback) "caller" else "callee" }
 
-    Log.d("CallScreen", "Initialized: callId=$callId, isVideo=$isVideo, role=$role, playRingback=$playRingback")
+    Log.d("CallScreen", "Initialized: callId=$callId, isVideo=$isVideo, role=$role")
 
     // WebRTC состояния
     val isMuted by WebRtcCallManager.isMuted.collectAsState()
@@ -101,13 +90,12 @@ fun CallScreen(
     val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
     val scope = rememberCoroutineScope()
 
-    // ИСПРАВЛЕНИЕ: ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ WebRTC
+    // Инициализация WebRTC
     LaunchedEffect(callId, isVideo, role, playRingback) {
         Log.d("CallScreen", "Starting WebRTC: callId=$callId, isVideo=$isVideo, role=$role")
 
         WebRtcCallManager.init(context)
 
-        // ВАЖНО: playRingback только для caller
         val shouldPlayRingback = (role == "caller" && playRingback)
 
         WebRtcCallManager.startCall(
@@ -117,7 +105,6 @@ fun CallScreen(
             role = role
         )
 
-        // Запускаем foreground сервис
         CallService.start(
             ctx = context,
             callId = callId,
@@ -198,8 +185,6 @@ fun CallScreen(
     var answerApplied by remember(callId) { mutableStateOf(false) }
 
     // Firestore listeners
-    // Теперь этот Effect будет создан *после* того, как LaunchedEffect выше
-    // вызовет `startCall`, поэтому `peer` в WebRtcCallManager уже будет создан.
     DisposableEffect(callId, role) {
         val callDoc = db.collection("calls").document(callId)
         val docReg: ListenerRegistration = callDoc.addSnapshotListener { snap, _ ->
@@ -244,7 +229,6 @@ fun CallScreen(
                 }
             }
 
-            // Video upgrade request
             val videoUpgradeTs = data["videoUpgradeRequest"]
             if (videoUpgradeTs != null && role == "callee") {
                 val fromUser = (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
@@ -285,7 +269,7 @@ fun CallScreen(
         }
     }
 
-    // Broadcast receiver для внутренних команд
+    // Broadcast receiver
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -311,10 +295,6 @@ fun CallScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // --- ИНИЦИАЛИЗАЦИЯ WebRTC БЫЛА ПЕРЕМЕЩЕНА ВВЕРХ ---
-    // (блок LaunchedEffect был здесь, теперь он выше)
-
-
     // Cleanup
     DisposableEffect(Unit) {
         onDispose {
@@ -334,7 +314,7 @@ fun CallScreen(
 
     // UI
     if (isVideoEnabled) {
-        VideoCallUI(
+        ModernVideoCallUI(
             peerName = peerName ?: "Звонок",
             elapsedMillis = elapsedMillis,
             isMuted = isMuted,
@@ -358,7 +338,7 @@ fun CallScreen(
             }
         )
     } else {
-        AudioCallUI(
+        ModernAudioCallUI(
             peerName = peerName ?: "Звонок",
             elapsedMillis = elapsedMillis,
             isMuted = isMuted,
@@ -383,7 +363,7 @@ fun CallScreen(
 
     // Диалог запроса видео
     videoUpgradeRequest?.let { request ->
-        VideoUpgradeDialog(
+        ModernVideoUpgradeDialog(
             fromUsername = request.fromUsername,
             onAccept = {
                 WebRtcCallManager.acceptVideoUpgrade()
@@ -426,10 +406,10 @@ fun CallScreen(
     }
 }
 
-// ==================== AUDIO CALL UI ====================
-// ... (остальной код UI без изменений) ...
+// ==================== СОВРЕМЕННЫЙ АУДИО ЗВОНОК UI ====================
+
 @Composable
-private fun AudioCallUI(
+private fun ModernAudioCallUI(
     peerName: String,
     elapsedMillis: Long,
     isMuted: Boolean,
@@ -447,72 +427,82 @@ private fun AudioCallUI(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        MaterialTheme.colorScheme.primaryContainer,
-                        MaterialTheme.colorScheme.secondaryContainer
+                        Color(0xFF667eea),
+                        Color(0xFF764ba2),
+                        Color(0xFF8e44ad)
                     )
                 )
             )
     ) {
+        // Фоновый декоративный круг
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = (-100).dp)
+                .size(400.dp)
+                .alpha(0.1f)
+                .background(Color.White, CircleShape)
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.weight(0.2f))
+            Spacer(Modifier.height(40.dp))
 
             // Индикаторы состояния
             ConnectionAndQualityIndicators(connectionState, callQuality)
 
+            Spacer(Modifier.weight(0.3f))
+
+            // Пульсирующий аватар
+            AnimatedCallAvatar(peerName)
+
             Spacer(Modifier.height(32.dp))
-
-            // Аватар с пульсацией
-            PulsatingAvatar(peerName)
-
-            Spacer(Modifier.height(24.dp))
 
             // Имя
             Text(
                 text = peerName,
-                style = MaterialTheme.typography.headlineMedium,
+                style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
+                color = Color.White,
+                textAlign = TextAlign.Center
             )
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
 
             // Таймер
             Text(
                 text = formatElapsed(elapsedMillis),
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color.White.copy(alpha = 0.8f),
+                fontWeight = FontWeight.Medium
             )
 
             Spacer(Modifier.weight(1f))
 
             // Контролы
             Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Микрофон
-                ControlButton(
+                ModernControlButton(
                     icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                     isActive = !isMuted,
                     onClick = onToggleMic,
                     label = if (isMuted) "Включить" else "Выкл"
                 )
 
-                // Спикер
-                ControlButton(
+                ModernControlButton(
                     icon = if (isSpeakerOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeDown,
                     isActive = isSpeakerOn,
                     onClick = onToggleSpeaker,
                     label = "Громкость"
                 )
 
-                // Видео
-                ControlButton(
+                ModernControlButton(
                     icon = Icons.Filled.Videocam,
                     isActive = false,
                     onClick = onEnableVideo,
@@ -520,30 +510,20 @@ private fun AudioCallUI(
                 )
             }
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(48.dp))
 
             // Кнопка завершения
-            FloatingActionButton(
-                onClick = onHangup,
-                containerColor = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(72.dp)
-            ) {
-                Icon(
-                    Icons.Filled.CallEnd,
-                    contentDescription = "Завершить",
-                    modifier = Modifier.size(32.dp)
-                )
-            }
+            ModernHangupButton(onClick = onHangup)
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(48.dp))
         }
     }
 }
 
-// ==================== VIDEO CALL UI ====================
+// ==================== СОВРЕМЕННЫЙ ВИДЕО ЗВОНОК UI ====================
 
 @Composable
-private fun VideoCallUI(
+private fun ModernVideoCallUI(
     peerName: String,
     elapsedMillis: Long,
     isMuted: Boolean,
@@ -560,7 +540,6 @@ private fun VideoCallUI(
     val context = LocalContext.current
     var localRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
     var remoteRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
-    var localPrimary by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -569,110 +548,165 @@ private fun VideoCallUI(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // Remote video (фон)
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                SurfaceViewRenderer(ctx).apply {
-                    remoteRenderer = this
-                    WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
-                    WebRtcCallManager.bindRemoteRenderer(this)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        // Remote video (полный экран с blur эффектом для фона)
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .blur(40.dp)
+                    .alpha(0.5f),
+                factory = { ctx ->
+                    SurfaceViewRenderer(ctx).apply {
+                        val renderer = this
+                        WebRtcCallManager.prepareRenderer(renderer, mirror = false, overlay = false)
+                        WebRtcCallManager.bindRemoteRenderer(renderer)
+                        remoteRenderer = renderer
+                    }
                 }
-            }
-        )
+            )
 
-        // Local video (PiP)
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp)
-                .size(120.dp, 160.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .clickable { localPrimary = !localPrimary }
-        ) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     SurfaceViewRenderer(ctx).apply {
-                        localRenderer = this
-                        WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
-                        WebRtcCallManager.bindLocalRenderer(this)
+                        val renderer = this
+                        WebRtcCallManager.prepareRenderer(renderer, mirror = false, overlay = false)
+                        WebRtcCallManager.bindRemoteRenderer(renderer)
                     }
                 }
             )
         }
 
-        // Индикаторы
+        // Local video (PiP с красивой рамкой)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(20.dp)
+                .size(120.dp, 180.dp)
+                .zIndex(10f)
+                .border(
+                    width = 3.dp,
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.3f),
+                            Color.White.copy(alpha = 0.1f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(20.dp)
+                )
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color.Black.copy(alpha = 0.3f))
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    SurfaceViewRenderer(ctx).apply {
+                        val renderer = this
+                        WebRtcCallManager.prepareRenderer(renderer, mirror = true, overlay = true)
+                        WebRtcCallManager.bindLocalRenderer(renderer)
+                        localRenderer = renderer
+                    }
+                }
+            )
+        }
+
+        // Градиентный оверлей сверху
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(200.dp)
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.7f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+
+        // Градиентный оверлей снизу
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(300.dp)
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.8f)
+                        )
+                    )
+                )
+        )
+
+        // Индикаторы и информация
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(16.dp)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             ConnectionAndQualityIndicators(connectionState, callQuality)
-            Spacer(Modifier.height(8.dp))
-            InfoChip(peerName)
-            Spacer(Modifier.height(4.dp))
-            InfoChip(formatElapsed(elapsedMillis))
+
+            GlassInfoChip(peerName)
+            GlassInfoChip(formatElapsed(elapsedMillis))
         }
 
         // Контролы
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp),
+                .padding(bottom = 48.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ControlButton(
+                ModernVideoControlButton(
                     icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                     isActive = !isMuted,
                     onClick = onToggleMic
                 )
 
-                ControlButton(
+                ModernVideoControlButton(
                     icon = if (isVideoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
                     isActive = isVideoEnabled,
                     onClick = onToggleVideo
                 )
 
-                ControlButton(
+                ModernVideoControlButton(
                     icon = Icons.Filled.Cameraswitch,
                     isActive = true,
                     onClick = onSwitchCamera
                 )
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(32.dp))
 
-            FloatingActionButton(
-                onClick = onHangup,
-                containerColor = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(72.dp)
-            ) {
-                Icon(
-                    Icons.Filled.CallEnd,
-                    contentDescription = "Завершить",
-                    modifier = Modifier.size(32.dp)
-                )
-            }
+            ModernHangupButton(onClick = onHangup)
         }
     }
 }
 
-// ==================== UI COMPONENTS ====================
+// ==================== UI КОМПОНЕНТЫ ====================
 
 @Composable
-private fun PulsatingAvatar(name: String) {
+private fun AnimatedCallAvatar(name: String) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val scale by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = 1.1f,
+        targetValue = 1.15f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = FastOutSlowInEasing),
+            animation = tween(1500, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "scale"
@@ -680,64 +714,163 @@ private fun PulsatingAvatar(name: String) {
 
     val initial = name.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
 
-    Box(
-        modifier = Modifier
-            .size(120.dp)
-            .scale(scale)
-            .clip(CircleShape)
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(
-                        MaterialTheme.colorScheme.primary,
-                        MaterialTheme.colorScheme.secondary
+    Box(contentAlignment = Alignment.Center) {
+        // Пульсирующие круги
+        repeat(3) { index ->
+            val delay = index * 500
+            val alpha by infiniteTransition.animateFloat(
+                initialValue = 0.6f,
+                targetValue = 0f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(2000, easing = LinearEasing, delayMillis = delay),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "alpha$index"
+            )
+            val circleScale by infiniteTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.8f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(2000, easing = FastOutSlowInEasing, delayMillis = delay),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "circleScale$index"
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(150.dp)
+                    .scale(circleScale)
+                    .alpha(alpha)
+                    .background(
+                        Color.White.copy(alpha = 0.3f),
+                        CircleShape
                     )
+            )
+        }
+
+        // Основной аватар
+        Box(
+            modifier = Modifier
+                .size(150.dp)
+                .scale(scale)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.9f),
+                            Color.White.copy(alpha = 0.7f)
+                        )
+                    ),
+                    CircleShape
                 )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = initial,
-            style = MaterialTheme.typography.displayLarge,
-            color = MaterialTheme.colorScheme.onPrimary,
-            fontWeight = FontWeight.Bold
-        )
+                .border(4.dp, Color.White.copy(alpha = 0.3f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = initial,
+                style = MaterialTheme.typography.displayLarge,
+                color = Color(0xFF667eea),
+                fontWeight = FontWeight.Bold,
+                fontSize = 56.sp
+            )
+        }
     }
 }
 
 @Composable
-private fun ControlButton(
+private fun ModernControlButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     isActive: Boolean,
     onClick: () -> Unit,
     label: String? = null
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        FilledTonalIconButton(
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Surface(
             onClick = onClick,
-            modifier = Modifier.size(64.dp),
-            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                containerColor = if (isActive)
-                    MaterialTheme.colorScheme.primaryContainer
-                else
-                    MaterialTheme.colorScheme.surfaceVariant
-            )
+            modifier = Modifier.size(72.dp),
+            shape = CircleShape,
+            color = if (isActive)
+                Color.White.copy(alpha = 0.25f)
+            else
+                Color.White.copy(alpha = 0.15f),
+            shadowElevation = if (isActive) 8.dp else 0.dp
         ) {
-            Icon(
-                icon,
-                contentDescription = label,
-                modifier = Modifier.size(28.dp),
-                tint = if (isActive)
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                else
-                    MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    icon,
+                    contentDescription = label,
+                    modifier = Modifier.size(32.dp),
+                    tint = Color.White
+                )
+            }
         }
         if (label != null) {
-            Spacer(Modifier.height(4.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModernVideoControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isActive: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(64.dp),
+        shape = CircleShape,
+        color = if (isActive)
+            Color.White.copy(alpha = 0.25f)
+        else
+            Color.White.copy(alpha = 0.15f)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = Color.White
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModernHangupButton(onClick: () -> Unit) {
+    val scale by rememberInfiniteTransition(label = "hangup").animateFloat(
+        initialValue = 1f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "scale"
+    )
+
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .size(72.dp)
+            .scale(scale),
+        shape = CircleShape,
+        color = Color(0xFFE53935),
+        shadowElevation = 16.dp
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                Icons.Filled.CallEnd,
+                contentDescription = "Завершить",
+                modifier = Modifier.size(36.dp),
+                tint = Color.White
             )
         }
     }
@@ -749,11 +882,13 @@ private fun ConnectionAndQualityIndicators(
     quality: WebRtcCallManager.Quality
 ) {
     Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         ConnectionIndicator(connectionState)
-        QualityIndicator(quality)
+        if (connectionState == WebRtcCallManager.ConnectionState.CONNECTED) {
+            QualityIndicator(quality)
+        }
     }
 }
 
@@ -767,30 +902,7 @@ private fun ConnectionIndicator(state: WebRtcCallManager.ConnectionState) {
         else -> return
     }
 
-    Surface(
-        color = color,
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 2.dp
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(Color.White)
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = text,
-                color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
+    GlassChip(text = text, color = color)
 }
 
 @Composable
@@ -803,38 +915,55 @@ private fun QualityIndicator(quality: WebRtcCallManager.Quality) {
         else -> return
     }
 
+    GlassChip(text = text, color = color)
+}
+
+@Composable
+private fun GlassChip(text: String, color: Color) {
     Surface(
-        color = color,
+        color = color.copy(alpha = 0.9f),
         shape = RoundedCornerShape(12.dp),
-        tonalElevation = 2.dp
+        shadowElevation = 4.dp
     ) {
-        Text(
-            text = text,
-            color = Color.White,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-        )
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(Color.White, CircleShape)
+            )
+            Text(
+                text = text,
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
+        }
     }
 }
 
 @Composable
-private fun InfoChip(text: String) {
+private fun GlassInfoChip(text: String) {
     Surface(
-        color = Color.Black.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(8.dp)
+        color = Color.White.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(12.dp)
     ) {
         Text(
             text = text,
             color = Color.White,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
         )
     }
 }
 
 @Composable
-private fun VideoUpgradeDialog(
+private fun ModernVideoUpgradeDialog(
     fromUsername: String,
     onAccept: () -> Unit,
     onDecline: () -> Unit
@@ -843,24 +972,53 @@ private fun VideoUpgradeDialog(
         onDismissRequest = onDecline,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Card(
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
-            shape = RoundedCornerShape(24.dp)
+                .padding(32.dp),
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 24.dp
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier.padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Icon(
-                    Icons.Filled.Videocam,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                // Анимированная иконка
+                val scale by rememberInfiniteTransition(label = "icon").animateFloat(
+                    initialValue = 1f,
+                    targetValue = 1.1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(800, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "scale"
                 )
 
-                Spacer(Modifier.height(16.dp))
+                Box(
+                    modifier = Modifier
+                        .size(80.dp)
+                        .scale(scale)
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                    Color.Transparent
+                                )
+                            ),
+                            CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Videocam,
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                Spacer(Modifier.height(24.dp))
 
                 Text(
                     text = "Переход на видео",
@@ -868,33 +1026,38 @@ private fun VideoUpgradeDialog(
                     fontWeight = FontWeight.Bold
                 )
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
 
                 Text(
-                    text = "$fromUsername хочет включить видео.\nВключить камеру?",
+                    text = "$fromUsername хочет включить видео",
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(32.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     OutlinedButton(
                         onClick = onDecline,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
-                        Text("Нет, спасибо")
+                        Text("Нет, спасибо", Modifier.padding(vertical = 4.dp))
                     }
 
                     Button(
                         onClick = onAccept,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
                     ) {
-                        Text("Включить")
+                        Text("Включить камеру", Modifier.padding(vertical = 4.dp))
                     }
                 }
             }
@@ -910,37 +1073,4 @@ private fun formatElapsed(ms: Long): String {
     val m = (total % 3600) / 60
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
-}
-
-// ==================== PREVIEWS ====================
-
-@Preview(showBackground = true, widthDp = 360, heightDp = 760)
-@Composable
-private fun PreviewAudioCall() {
-    AppTheme {
-        AudioCallUI(
-            peerName = "Джон Доу",
-            elapsedMillis = 65000,
-            isMuted = false,
-            isSpeakerOn = true,
-            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
-            callQuality = WebRtcCallManager.Quality.Good,
-            onToggleMic = {},
-            onToggleSpeaker = {},
-            onEnableVideo = {},
-            onHangup = {}
-        )
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun PreviewVideoUpgradeDialog() {
-    AppTheme {
-        VideoUpgradeDialog(
-            fromUsername = "Мария",
-            onAccept = {},
-            onDecline = {}
-        )
-    }
 }
