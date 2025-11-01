@@ -64,6 +64,9 @@ class MainActivity : ComponentActivity() {
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
+    // Хранение ожидающего намерения для обработки после получения разрешений
+    private var pendingIntent: Intent? = null
+
     // НОВОЕ: Лончер для запроса разрешений
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -71,6 +74,18 @@ class MainActivity : ComponentActivity() {
         // Обработка результата запроса разрешений
         permissions.entries.forEach {
             android.util.Log.d("Permissions", "${it.key} = ${it.value}")
+        }
+        
+        // Если все необходимые разрешения получены, обработать ожидающее намерение
+        val allGranted = permissions.values.all { it }
+        if (allGranted && pendingIntent != null) {
+            android.util.Log.d("Permissions", "All permissions granted, processing pending intent")
+            val intent = pendingIntent
+            pendingIntent = null
+            intent?.let { intentEvents.tryEmit(it) }
+        } else if (!allGranted) {
+            android.util.Log.w("Permissions", "Not all permissions granted")
+            pendingIntent = null
         }
     }
 
@@ -238,12 +253,16 @@ class MainActivity : ComponentActivity() {
 
                             // Проверяем разрешения перед принятием звонка
                             if (!checkCallPermissions(includeCamera = isVideo)) {
+                                android.util.Log.d("MainActivity", "Permissions not granted, requesting and saving intent")
+                                pendingIntent = i  // Сохраняем намерение для обработки после получения разрешений
                                 requestCallPermissions(includeCamera = isVideo)
                                 return
                             }
 
                             // ИСПРАВЛЕНИЕ: Не запускаем CallService здесь!
                             // CallScreen сам запустит CallService с правильными параметрами
+
+                            android.util.Log.d("MainActivity", "Permissions granted, accepting call: $callId")
 
                             // ИСПРАВЛЕНИЕ: Навигируем на CallScreen с правильными параметрами
                             // Для входящего звонка: playRingback = false, role = callee

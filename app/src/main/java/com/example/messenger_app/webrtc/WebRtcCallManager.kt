@@ -51,7 +51,7 @@ object WebRtcCallManager {
     private const val CALL_TIMEOUT_MS = 45_000L
     private const val RECONNECT_ATTEMPTS = 5
     private const val RECONNECT_DELAY_MS = 2_000L
-    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 500L
+    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 200L  // Check more frequently (was 500ms)
     private const val STREAM_ID = "ANTIMAX_STREAM"
 
     private val _isMuted = MutableStateFlow(false)
@@ -1173,14 +1173,15 @@ object WebRtcCallManager {
                         }
 
                         remoteVideoTrack = track
-                        track.setEnabled(true)
+                        // Don't force enable - respect the remote peer's video state
+                        // track.setEnabled(true)
                         
                         val trackEnabled = track.enabled()
                         _isRemoteVideoEnabled.value = trackEnabled
 
                         Log.d(TAG, "✅ Remote video track set, enabled: $trackEnabled")
 
-                        // Start monitoring the track state
+                        // Start monitoring the track state - this will update _isRemoteVideoEnabled
                         startMonitoringRemoteVideoTrack()
 
                         mainHandler.postDelayed({
