@@ -109,7 +109,28 @@ fun ChatScreen(
             }
         }
     }
+// НОВОЕ: Автоматически читаем новые сообщения в реальном времени
+    LaunchedEffect(messages.size, actualChatId) {
+        if (actualChatId != null && actualChatId!!.isNotBlank() && messages.isNotEmpty()) {
+            // Находим непрочитанные сообщения от других пользователей
+            val unreadMessages = messages.filter { msg ->
+                msg.senderId != myUid &&
+                        (msg.status == MessageStatus.SENT || msg.status == MessageStatus.DELIVERED)
+            }
 
+            if (unreadMessages.isNotEmpty()) {
+                Log.d("ChatScreen", "Auto-reading ${unreadMessages.size} new messages")
+                try {
+                    // Помечаем каждое сообщение как прочитанное
+                    unreadMessages.forEach { msg ->
+                        chatRepo.markMessageAsRead(actualChatId!!, msg.id)
+                    }
+                } catch (e: Exception) {
+                    Log.e("ChatScreen", "Error auto-reading messages", e)
+                }
+            }
+        }
+    }
 // Очищаем активный чат при выходе
     DisposableEffect(Unit) {
         onDispose {

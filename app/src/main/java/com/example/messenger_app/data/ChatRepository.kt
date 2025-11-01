@@ -46,7 +46,7 @@ class ChatRepository(
     }
 
     /**
-     * НОВОЕ: Пометить ВСЕ непрочитанные сообщения чата как прочитанные
+     * ИСПРАВЛЕНО: Пометить ВСЕ непрочитанные сообщения чата как прочитанные
      */
     private suspend fun markAllMessagesAsRead(chatId: String) {
         if (chatId.isBlank()) return
@@ -54,25 +54,39 @@ class ChatRepository(
         val myUid = requireUid()
 
         try {
-            // Получаем все непрочитанные сообщения от других пользователей
-            val unreadMessages = db.collection("chats")
+            // ИСПРАВЛЕНО: Получаем ВСЕ сообщения и фильтруем локально
+            // (whereNotEqualTo + whereIn не работают вместе в Firestore)
+            val allMessages = db.collection("chats")
                 .document(chatId)
                 .collection("messages")
-                .whereNotEqualTo("senderId", myUid)
-                .whereIn("status", listOf("SENT", "DELIVERED"))
                 .get()
                 .await()
 
-            if (unreadMessages.documents.isEmpty()) {
+            if (allMessages.documents.isEmpty()) {
+                Log.d("ChatRepository", "No messages in chat")
+                return
+            }
+
+            // Фильтруем непрочитанные сообщения от других пользователей
+            val unreadMessages = allMessages.documents.filter { doc ->
+                val senderId = doc.getString("senderId")
+                val status = doc.getString("status")
+                senderId != myUid && (status == "SENT" || status == "DELIVERED")
+            }
+
+            if (unreadMessages.isEmpty()) {
                 Log.d("ChatRepository", "No unread messages to mark")
                 return
             }
 
+            Log.d("ChatRepository", "Found ${unreadMessages.size} unread messages")
+
             // Обновляем статус батчем
             val batch = db.batch()
             var count = 0
+            var batchCount = 0
 
-            unreadMessages.documents.forEach { doc ->
+            unreadMessages.forEach { doc ->
                 val messageRef = db.collection("chats")
                     .document(chatId)
                     .collection("messages")
@@ -83,16 +97,19 @@ class ChatRepository(
                     "readAt" to FieldValue.serverTimestamp()
                 ))
                 count++
+                batchCount++
 
                 // Firebase batch ограничен 500 операциями
-                if (count >= 500) {
+                if (batchCount >= 500) {
                     batch.commit().await()
-                    count = 0
+                    Log.d("ChatRepository", "Committed batch of $batchCount messages")
+                    batchCount = 0
                 }
             }
 
-            if (count > 0) {
+            if (batchCount > 0) {
                 batch.commit().await()
+                Log.d("ChatRepository", "Committed final batch of $batchCount messages")
             }
 
             // Обнуляем счетчик непрочитанных
@@ -101,13 +118,60 @@ class ChatRepository(
                 .update("unreadCount.$myUid", 0)
                 .await()
 
-            Log.d("ChatRepository", "Marked ${unreadMessages.size()} messages as READ")
+            Log.d("ChatRepository", "Successfully marked $count messages as READ")
         } catch (e: Exception) {
             Log.e("ChatRepository", "Error marking messages as read", e)
-            throw e
+            // Не бросаем исключение, чтобы не прерывать работу
         }
     }
+    /**
+     * НОВОЕ: Пометить одно сообщение как прочитанное
+     */
+    suspend fun markMessageAsRead(chatId: String, messageId: String) {
+        if (chatId.isBlank() || messageId.isBlank()) return
 
+        val myUid = requireUid()
+
+        try {
+            val messageRef = db.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .document(messageId)
+
+            val messageDoc = messageRef.get().await()
+
+            // Проверяем, что сообщение существует и не от нас
+            if (!messageDoc.exists()) return
+
+            val senderId = messageDoc.getString("senderId")
+            val status = messageDoc.getString("status")
+
+            // Помечаем как прочитанное только если это не наше сообщение
+            if (senderId != myUid && (status == "SENT" || status == "DELIVERED")) {
+                messageRef.update(
+                    mapOf(
+                        "status" to MessageStatus.READ.name,
+                        "readAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+
+                Log.d("ChatRepository", "Message $messageId marked as READ")
+
+                // Уменьшаем счетчик непрочитанных
+                val chatDoc = db.collection("chats").document(chatId).get().await()
+                val currentUnread = (chatDoc.get("unreadCount.$myUid") as? Long)?.toInt() ?: 0
+                if (currentUnread > 0) {
+                    db.collection("chats")
+                        .document(chatId)
+                        .update("unreadCount.$myUid", (currentUnread - 1).coerceAtLeast(0))
+                        .await()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error marking message as read", e)
+            // Не бросаем исключение
+        }
+    }
     /**
      * Получить или создать чат с пользователем
      */

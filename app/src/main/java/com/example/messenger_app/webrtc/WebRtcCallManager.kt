@@ -43,7 +43,10 @@ import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * ИСПРАВЛЕННЫЙ WebRTC Call Manager с поддержкой video upgrade
+ * ИСПРАВЛЕННЫЙ WebRTC Call Manager
+ * - Правильная video upgrade логика
+ * - Корректная обработка удаленного видео
+ * - Поддержка одностороннего видео
  */
 object WebRtcCallManager {
 
@@ -62,6 +65,9 @@ object WebRtcCallManager {
 
     private val _isVideoEnabled = MutableStateFlow(false)
     val isVideoEnabled: StateFlow<Boolean> = _isVideoEnabled
+
+    private val _isRemoteVideoEnabled = MutableStateFlow(false)
+    val isRemoteVideoEnabled: StateFlow<Boolean> = _isRemoteVideoEnabled
 
     private val _callStartedAtMs = MutableStateFlow<Long?>(null)
     val callStartedAtMs: StateFlow<Long?> = _callStartedAtMs
@@ -218,6 +224,7 @@ object WebRtcCallManager {
         currentRole = role
         isStarted.set(true)
         _isVideoEnabled.value = isVideo
+        _isRemoteVideoEnabled.value = false
         _callStartedAtMs.value = null
         _callQuality.value = Quality.Good
         _connectionState.value = ConnectionState.CONNECTING
@@ -339,6 +346,7 @@ object WebRtcCallManager {
         currentRole = null
         remoteDescriptionSet = false
         pendingIceCandidates.clear()
+        _isRemoteVideoEnabled.value = false
 
         Log.d(TAG, "========== END CALL COMPLETE ==========")
     }
@@ -579,7 +587,6 @@ object WebRtcCallManager {
         if (willEnable) {
             if (videoTrack == null) {
                 createAndStartLocalVideo()
-                // КРИТИЧНО: Инициируем renegotiation
                 triggerRenegotiation()
             } else {
                 videoTrack?.setEnabled(true)
@@ -626,9 +633,6 @@ object WebRtcCallManager {
 
     // ==================== VIDEO UPGRADE ====================
 
-    /**
-     * ИСПРАВЛЕНО: Правильный video upgrade с renegotiation
-     */
     fun requestVideoUpgrade() {
         if (_isVideoEnabled.value) {
             Log.d(TAG, "Video already enabled")
@@ -637,10 +641,7 @@ object WebRtcCallManager {
 
         Log.d(TAG, "========== REQUESTING VIDEO UPGRADE ==========")
 
-        // Уведомляем удаленную сторону
         signalingDelegate?.onVideoUpgradeRequest()
-
-        // Включаем видео локально
         toggleVideo()
 
         Log.d(TAG, "Video upgrade request sent")
@@ -660,8 +661,6 @@ object WebRtcCallManager {
     fun declineVideoUpgrade() {
         Log.d(TAG, "Declining video upgrade")
         _videoUpgradeRequest.value = null
-        // Даже если отказались, мы должны видеть видео собеседника
-        // Поэтому не делаем ничего особенного
     }
 
     fun onRemoteVideoUpgradeRequest(fromUsername: String) {
@@ -670,9 +669,6 @@ object WebRtcCallManager {
         _videoUpgradeRequest.value = VideoUpgradeRequest(fromUsername)
     }
 
-    /**
-     * НОВОЕ: Триггер renegotiation для добавления видео
-     */
     private fun triggerRenegotiation() {
         Log.d(TAG, "========== TRIGGERING RENEGOTIATION ==========")
 
@@ -686,11 +682,9 @@ object WebRtcCallManager {
             return
         }
 
-        // Создаем новый offer/answer
         if (role == "caller") {
             createOffer()
         } else {
-            // Callee ждет нового offer от caller
             Log.d(TAG, "Callee: waiting for renegotiation offer")
         }
     }
@@ -1074,7 +1068,6 @@ object WebRtcCallManager {
 
         override fun onRenegotiationNeeded() {
             Log.d(TAG, "========== RENEGOTIATION NEEDED ==========")
-            // WebRTC автоматически обрабатывает это
         }
 
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out org.webrtc.MediaStream>?) {
@@ -1110,6 +1103,7 @@ object WebRtcCallManager {
 
                     remoteVideoTrack = track
                     track.setEnabled(true)
+                    _isRemoteVideoEnabled.value = true
 
                     if (view != null) {
                         attachRemoteSinkTo(view)
