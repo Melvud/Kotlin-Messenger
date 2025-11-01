@@ -22,6 +22,7 @@ import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
+import org.webrtc.MediaStream
 import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnection.IceServer
@@ -43,22 +44,13 @@ import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * ═══════════════════════════════════════════════════════════════
- *          ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ WebRTC Call Manager
- * ═══════════════════════════════════════════════════════════════
- * ИСПРАВЛЕНО:
- * - Аудио треки теперь ВСЕГДА работают
- * - Видео передается обоим участникам
- * - Односторонняя передача видео работает
- * - Правильная обработка transceivers
- */
 object WebRtcCallManager {
 
     private const val TAG = "WebRtcCallManager"
     private const val CALL_TIMEOUT_MS = 30_000L
     private const val RECONNECT_ATTEMPTS = 3
     private const val RECONNECT_DELAY_MS = 2_000L
+    private const val STREAM_ID = "ANTIMAX_STREAM"
 
     // ==================== PUBLIC STATE ====================
 
@@ -115,17 +107,17 @@ object WebRtcCallManager {
     // Audio
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
+    private var audioSender: RtpSender? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
-    private var audioSender: RtpSender? = null
 
     // Video
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
+    private var videoSender: RtpSender? = null
     private var videoCapturer: CameraVideoCapturer? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var remoteVideoTrack: VideoTrack? = null
-    private var videoSender: RtpSender? = null
 
     // State
     private var currentCallId: String? = null
@@ -144,6 +136,9 @@ object WebRtcCallManager {
     private val pendingIceCandidates = mutableListOf<IceCandidate>()
     private var remoteDescriptionSet = false
 
+    // Audio device module
+    private var audioDeviceModule: JavaAudioDeviceModule? = null
+
     // ==================== INITIALIZATION ====================
 
     fun init(context: Context) {
@@ -152,14 +147,17 @@ object WebRtcCallManager {
             return
         }
 
-        Log.d(TAG, "========== INITIALIZING WebRTC ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🚀 INITIALIZING WebRTC")
+        Log.d(TAG, "========================================")
+
         appContext = context.applicationContext
 
         try {
             System.loadLibrary("jingle_peerconnection_so")
-            Log.d(TAG, "Native library loaded")
+            Log.d(TAG, "✅ Native library loaded")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load native library", e)
+            Log.e(TAG, "❌ Failed to load native library", e)
         }
 
         val options = PeerConnectionFactory.InitializationOptions
@@ -168,10 +166,10 @@ object WebRtcCallManager {
             .createInitializationOptions()
 
         PeerConnectionFactory.initialize(options)
-        Log.d(TAG, "PeerConnectionFactory initialized")
+        Log.d(TAG, "✅ PeerConnectionFactory initialized")
 
         eglBase = EglBase.create()
-        Log.d(TAG, "EglBase created")
+        Log.d(TAG, "✅ EglBase created")
 
         val encoderFactory = DefaultVideoEncoderFactory(
             eglBase!!.eglBaseContext,
@@ -180,7 +178,7 @@ object WebRtcCallManager {
         )
         val decoderFactory = DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
 
-        val adm = JavaAudioDeviceModule.builder(appContext)
+        audioDeviceModule = JavaAudioDeviceModule.builder(appContext)
             .setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true)
             .setUseStereoInput(false)
@@ -190,7 +188,7 @@ object WebRtcCallManager {
         pcFactory = PeerConnectionFactory.builder()
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
-            .setAudioDeviceModule(adm)
+            .setAudioDeviceModule(audioDeviceModule)
             .setOptions(PeerConnectionFactory.Options().apply {
                 disableEncryption = false
                 disableNetworkMonitor = false
@@ -199,7 +197,9 @@ object WebRtcCallManager {
 
         audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        Log.d(TAG, "========== WebRTC INITIALIZED ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "✅ WebRTC INITIALIZATION COMPLETE")
+        Log.d(TAG, "========================================")
     }
 
     // ==================== CALL MANAGEMENT ====================
@@ -214,8 +214,12 @@ object WebRtcCallManager {
         require(::appContext.isInitialized) { "Call init(context) first!" }
         require(role == "caller" || role == "callee") { "Invalid role: $role" }
 
-        Log.d(TAG, "========== START CALL ==========")
-        Log.d(TAG, "callId: $callId, isVideo: $isVideo, role: $role")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📞 START CALL")
+        Log.d(TAG, "callId: $callId")
+        Log.d(TAG, "isVideo: $isVideo")
+        Log.d(TAG, "role: $role")
+        Log.d(TAG, "========================================")
 
         if (isStarted.get() && currentCallId == callId) {
             Log.w(TAG, "Call already running, ignoring")
@@ -224,7 +228,7 @@ object WebRtcCallManager {
 
         if (isStarted.get() && currentCallId != callId) {
             Log.w(TAG, "Ending previous call: $currentCallId")
-            endCallInternal(true)
+            endCallInternal(false)
         }
 
         currentCallId = callId
@@ -277,58 +281,52 @@ object WebRtcCallManager {
         peer = pcFactory!!.createPeerConnection(rtcConfig, pcObserver)
 
         if (peer == null) {
-            Log.e(TAG, "FATAL: Failed to create PeerConnection")
+            Log.e(TAG, "❌ FATAL: Failed to create PeerConnection")
             _connectionState.value = ConnectionState.FAILED
-            endCallInternal(true)
+            endCallInternal(false)
             return
         }
 
-        Log.d(TAG, "PeerConnection created successfully")
+        Log.d(TAG, "✅ PeerConnection created")
 
-        // ★★★ КРИТИЧЕСКИ ВАЖНО: Добавляем transceivers ДО создания треков ★★★
-        // Это обеспечивает правильную передачу и прием аудио/видео
-        peer?.addTransceiver(
-            MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
-            RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV)
-        )
-
-        peer?.addTransceiver(
-            MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
-            RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV)
-        )
-
-        Log.d(TAG, "Transceivers added for audio and video")
-
-        // Теперь создаем и добавляем треки
+        // КРИТИЧЕСКИ ВАЖНО: Создаем треки СИНХРОННО до создания offer/answer
         setupAudioTrack()
 
         if (isVideo) {
-            createAndStartLocalVideo()
+            createAndStartLocalVideoSync()
         }
 
-        if (role == "caller") {
-            Log.d(TAG, "Role=CALLER: creating offer...")
-            createOffer()
-        } else {
-            Log.d(TAG, "Role=CALLEE: waiting for offer...")
-        }
+        // Небольшая задержка для стабильности
+        mainHandler.postDelayed({
+            if (role == "caller") {
+                Log.d(TAG, "Role=CALLER: creating offer...")
+                createOffer()
+            } else {
+                Log.d(TAG, "Role=CALLEE: waiting for offer...")
+            }
+        }, 200)
 
-        Log.d(TAG, "========== START CALL COMPLETE ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "✅ START CALL COMPLETE")
+        Log.d(TAG, "========================================")
     }
 
     fun endCall() {
         Log.d(TAG, "endCall() called")
-        endCallInternal(true)
+        endCallInternal(false)
     }
 
     @Synchronized
-    private fun endCallInternal(releaseAll: Boolean) {
-        if (!isStarted.get() && !releaseAll) {
+    private fun endCallInternal(disposeAudioModule: Boolean) {
+        if (!isStarted.get()) {
             Log.d(TAG, "Call not started, nothing to end")
             return
         }
 
-        Log.d(TAG, "========== END CALL ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🔚 END CALL")
+        Log.d(TAG, "========================================")
+
         isStarted.set(false)
         _callStartedAtMs.value = null
         _connectionState.value = ConnectionState.DISCONNECTED
@@ -336,29 +334,45 @@ object WebRtcCallManager {
         cancelCallTimeout()
         cancelReconnect()
 
+        // Отключаем треки
+        try {
+            audioTrack?.setEnabled(false)
+            videoTrack?.setEnabled(false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error disabling tracks", e)
+        }
+
+        // Удаляем senders
+        try {
+            audioSender?.let { peer?.removeTrack(it) }
+            videoSender?.let { peer?.removeTrack(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing senders", e)
+        }
+
         peer?.let {
             try {
                 it.close()
-                Log.d(TAG, "PeerConnection closed")
+                Log.d(TAG, "✅ PeerConnection closed")
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing peer", e)
             }
         }
         peer = null
-        audioSender = null
-        videoSender = null
 
         disposeVideoChain()
 
+        // Dispose audio
         try {
             audioTrack?.dispose()
             audioSource?.dispose()
-            Log.d(TAG, "Audio disposed")
+            audioTrack = null
+            audioSource = null
+            audioSender = null
+            Log.d(TAG, "✅ Audio disposed")
         } catch (e: Exception) {
             Log.e(TAG, "Error disposing audio", e)
         }
-        audioTrack = null
-        audioSource = null
 
         detachRenderer(true)
         detachRenderer(false)
@@ -372,13 +386,17 @@ object WebRtcCallManager {
         pendingIceCandidates.clear()
         _isRemoteVideoEnabled.value = false
 
-        Log.d(TAG, "========== END CALL COMPLETE ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "✅ END CALL COMPLETE")
+        Log.d(TAG, "========================================")
     }
 
     // ==================== AUDIO SETUP ====================
 
     private fun setupAudioTrack() {
-        Log.d(TAG, "Setting up audio track...")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🎤 SETTING UP AUDIO TRACK")
+        Log.d(TAG, "========================================")
 
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
@@ -390,25 +408,17 @@ object WebRtcCallManager {
         }
 
         audioSource = pcFactory!!.createAudioSource(audioConstraints)
-        audioTrack = pcFactory!!.createAudioTrack("AUDIO_TRACK", audioSource)
+        audioTrack = pcFactory!!.createAudioTrack("AUDIO_${System.currentTimeMillis()}", audioSource)
         audioTrack?.setEnabled(true)
 
-        // Находим аудио transceiver и заменяем трек
-        val audioTransceiver = peer?.transceivers?.find {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO
-        }
-
-        if (audioTransceiver != null) {
-            audioSender = audioTransceiver.sender
-            audioSender?.setTrack(audioTrack, true)
-            Log.d(TAG, "Audio track set to transceiver")
-        } else {
-            // Fallback: добавляем напрямую
-            audioSender = peer?.addTrack(audioTrack, listOf("STREAM"))
-            Log.d(TAG, "Audio track added directly")
-        }
+        // UNIFIED PLAN: используем addTrack вместо addStream
+        audioSender = peer?.addTrack(audioTrack, listOf(STREAM_ID))
 
         Log.d(TAG, "✅ Audio track created and added to peer")
+        Log.d(TAG, "   Track ID: ${audioTrack?.id()}")
+        Log.d(TAG, "   Enabled: ${audioTrack?.enabled()}")
+        Log.d(TAG, "   Sender ID: ${audioSender?.id()}")
+        Log.d(TAG, "========================================")
     }
 
     private fun setupAudioForCall(videoMode: Boolean) {
@@ -479,7 +489,7 @@ object WebRtcCallManager {
         }
 
         audioFocusRequest = null
-        Log.d(TAG, "Audio teardown complete")
+        Log.d(TAG, "✅ Audio teardown complete")
     }
 
     // ==================== AUDIO CONTROLS ====================
@@ -488,7 +498,7 @@ object WebRtcCallManager {
         val willMute = !_isMuted.value
         audioTrack?.setEnabled(!willMute)
         _isMuted.value = willMute
-        Log.d(TAG, "Microphone ${if (willMute) "MUTED" else "UNMUTED"}")
+        Log.d(TAG, "🎤 Microphone ${if (willMute) "MUTED" else "UNMUTED"}")
     }
 
     fun toggleSpeaker() {
@@ -500,7 +510,7 @@ object WebRtcCallManager {
         try {
             am.isSpeakerphoneOn = on
             _isSpeakerOn.value = on
-            Log.d(TAG, "Speakerphone ${if (on) "ON" else "OFF"}")
+            Log.d(TAG, "🔊 Speakerphone ${if (on) "ON" else "OFF"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error setting speakerphone", e)
         }
@@ -541,18 +551,16 @@ object WebRtcCallManager {
 
     // ==================== VIDEO SETUP ====================
 
-    private fun createAndStartLocalVideo() {
-        if (videoTrack != null) {
-            Log.d(TAG, "Video track already exists, enabling it")
-            videoTrack?.setEnabled(true)
-            _isVideoEnabled.value = true
-            return
-        }
-
-        Log.d(TAG, "Creating local video...")
+    /**
+     * ИСПРАВЛЕНО: Синхронное создание видео треков
+     */
+    private fun createAndStartLocalVideoSync() {
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📹 CREATING LOCAL VIDEO (SYNC)")
+        Log.d(TAG, "========================================")
 
         val capturer = createCameraCapturer() ?: run {
-            Log.e(TAG, "Failed to create camera capturer")
+            Log.e(TAG, "❌ Failed to create camera capturer")
             _isVideoEnabled.value = false
             return
         }
@@ -565,38 +573,39 @@ object WebRtcCallManager {
         )
 
         videoSource = pcFactory!!.createVideoSource(capturer.isScreencast)
+
+        // Инициализируем capturer
         capturer.initialize(
             surfaceTextureHelper,
             appContext,
             videoSource!!.capturerObserver
         )
 
+        // Запускаем захват
         capturer.startCapture(1280, 720, 30)
-        Log.d(TAG, "Camera capture started: 1280x720@30fps")
+        Log.d(TAG, "✅ Camera capture started: 1280x720@30fps")
 
-        videoTrack = pcFactory!!.createVideoTrack("VIDEO_TRACK", videoSource)
+        // Создаем трек
+        videoTrack = pcFactory!!.createVideoTrack("VIDEO_${System.currentTimeMillis()}", videoSource)
         videoTrack?.setEnabled(true)
 
-        // Находим видео transceiver и заменяем трек
-        val videoTransceiver = peer?.transceivers?.find {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        }
-
-        if (videoTransceiver != null) {
-            videoSender = videoTransceiver.sender
-            videoSender?.setTrack(videoTrack, true)
-            Log.d(TAG, "Video track set to transceiver")
-        } else {
-            // Fallback: добавляем напрямую
-            videoSender = peer?.addTrack(videoTrack, listOf("STREAM"))
-            Log.d(TAG, "Video track added directly")
-        }
+        // Добавляем трек в peer
+        videoSender = peer?.addTrack(videoTrack, listOf(STREAM_ID))
 
         _isVideoEnabled.value = true
 
-        localRendererRef?.get()?.let { attachLocalSinkTo(it) }
+        // Привязываем к рендереру если есть
+        localRendererRef?.get()?.let {
+            Log.d(TAG, "Attaching video to local renderer")
+            attachLocalSinkTo(it)
+        }
 
-        Log.d(TAG, "✅ Local video created and added to peer")
+        Log.d(TAG, "✅ Video track created and added to peer")
+        Log.d(TAG, "   Track ID: ${videoTrack?.id()}")
+        Log.d(TAG, "   Enabled: ${videoTrack?.enabled()}")
+        Log.d(TAG, "   Sender ID: ${videoSender?.id()}")
+        Log.d(TAG, "   Video Source: $videoSource")
+        Log.d(TAG, "========================================")
     }
 
     private fun createCameraCapturer(): CameraVideoCapturer? {
@@ -616,30 +625,35 @@ object WebRtcCallManager {
             }
         }
 
-        Log.e(TAG, "No camera found!")
+        Log.e(TAG, "❌ No camera found!")
         return null
     }
 
     fun switchCamera() {
         videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFrontFacing: Boolean) {
-                Log.d(TAG, "Camera switched: front=$isFrontFacing")
+                Log.d(TAG, "✅ Camera switched: front=$isFrontFacing")
             }
 
             override fun onCameraSwitchError(errorDescription: String?) {
-                Log.e(TAG, "Camera switch error: $errorDescription")
+                Log.e(TAG, "❌ Camera switch error: $errorDescription")
             }
         })
     }
 
     fun toggleVideo() {
         val willEnable = !_isVideoEnabled.value
-        Log.d(TAG, "Toggle video: $willEnable")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📹 TOGGLE VIDEO: $willEnable")
+        Log.d(TAG, "========================================")
 
         if (willEnable) {
             if (videoTrack == null) {
-                createAndStartLocalVideo()
-                triggerRenegotiation()
+                createAndStartLocalVideoSync()
+                // Renegotiation
+                mainHandler.postDelayed({
+                    triggerRenegotiation()
+                }, 500)
             } else {
                 videoTrack?.setEnabled(true)
                 _isVideoEnabled.value = true
@@ -653,6 +667,12 @@ object WebRtcCallManager {
 
     private fun disposeVideoChain() {
         Log.d(TAG, "Disposing video chain...")
+
+        try {
+            videoSender?.let { peer?.removeTrack(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing video sender", e)
+        }
 
         try {
             videoCapturer?.stopCapture()
@@ -678,9 +698,10 @@ object WebRtcCallManager {
         surfaceTextureHelper = null
         videoTrack = null
         videoSource = null
+        videoSender = null
         _isVideoEnabled.value = false
 
-        Log.d(TAG, "Video chain disposed")
+        Log.d(TAG, "✅ Video chain disposed")
     }
 
     // ==================== VIDEO UPGRADE ====================
@@ -691,38 +712,44 @@ object WebRtcCallManager {
             return
         }
 
-        Log.d(TAG, "========== REQUESTING VIDEO UPGRADE ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📹 REQUESTING VIDEO UPGRADE")
+        Log.d(TAG, "========================================")
 
         signalingDelegate?.onVideoUpgradeRequest()
         toggleVideo()
-
-        Log.d(TAG, "Video upgrade request sent")
     }
 
     fun acceptVideoUpgrade() {
-        Log.d(TAG, "========== ACCEPTING VIDEO UPGRADE ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "✅ ACCEPTING VIDEO UPGRADE")
+        Log.d(TAG, "========================================")
+
         _videoUpgradeRequest.value = null
 
         if (!_isVideoEnabled.value) {
             toggleVideo()
         }
-
-        Log.d(TAG, "Video upgrade accepted")
     }
 
     fun declineVideoUpgrade() {
-        Log.d(TAG, "Declining video upgrade")
+        Log.d(TAG, "❌ Declining video upgrade")
         _videoUpgradeRequest.value = null
     }
 
     fun onRemoteVideoUpgradeRequest(fromUsername: String) {
-        Log.d(TAG, "========== REMOTE VIDEO UPGRADE REQUEST ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📹 REMOTE VIDEO UPGRADE REQUEST")
         Log.d(TAG, "From: $fromUsername")
+        Log.d(TAG, "========================================")
+
         _videoUpgradeRequest.value = VideoUpgradeRequest(fromUsername)
     }
 
     private fun triggerRenegotiation() {
-        Log.d(TAG, "========== TRIGGERING RENEGOTIATION ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION")
+        Log.d(TAG, "========================================")
 
         val p = peer ?: run {
             Log.e(TAG, "Cannot renegotiate: peer is null")
@@ -737,7 +764,7 @@ object WebRtcCallManager {
         if (role == "caller") {
             createOffer()
         } else {
-            Log.d(TAG, "Callee: waiting for renegotiation offer")
+            Log.d(TAG, "Callee: waiting for renegotiation offer from caller")
         }
     }
 
@@ -758,7 +785,7 @@ object WebRtcCallManager {
             view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
             view.setEnableHardwareScaler(true)
             initializedRenderers.add(view)
-            Log.d(TAG, "Renderer initialized: overlay=$overlay")
+            Log.d(TAG, "✅ Renderer initialized: overlay=$overlay, mirror=$mirror")
         }
 
         view.setMirror(mirror)
@@ -776,10 +803,17 @@ object WebRtcCallManager {
 
         localRendererRef = WeakReference(view)
         attachLocalSinkTo(view)
-        Log.d(TAG, "Local renderer bound")
+        Log.d(TAG, "✅ Local renderer bound")
     }
 
     fun bindRemoteRenderer(view: SurfaceViewRenderer) {
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "🎬 BIND REMOTE RENDERER")
+        Log.d(TAG, "View attached: ${view.isAttachedToWindow}")
+        Log.d(TAG, "Remote track exists: ${remoteVideoTrack != null}")
+        Log.d(TAG, "Remote track enabled: ${remoteVideoTrack?.enabled()}")
+        Log.d(TAG, "========================================")
+
         val prev = remoteRendererRef?.get()
         if (prev != null && prev !== view) {
             try {
@@ -790,8 +824,12 @@ object WebRtcCallManager {
         }
 
         remoteRendererRef = WeakReference(view)
-        attachRemoteSinkTo(view)
-        Log.d(TAG, "Remote renderer bound")
+
+        if (remoteVideoTrack != null) {
+            attachRemoteSinkTo(view)
+        }
+
+        Log.d(TAG, "✅ Remote renderer bound")
     }
 
     private fun attachLocalSinkTo(view: SurfaceViewRenderer) {
@@ -799,7 +837,7 @@ object WebRtcCallManager {
             try {
                 videoTrack?.addSink(view)
                 view.invalidate()
-                Log.d(TAG, "Local sink attached")
+                Log.d(TAG, "✅ Local sink attached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error attaching local sink", e)
             }
@@ -811,7 +849,7 @@ object WebRtcCallManager {
             try {
                 remoteVideoTrack?.addSink(view)
                 view.invalidate()
-                Log.d(TAG, "Remote sink attached")
+                Log.d(TAG, "✅ Remote sink attached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error attaching remote sink", e)
             }
@@ -829,7 +867,7 @@ object WebRtcCallManager {
                 } else {
                     remoteVideoTrack?.removeSink(view)
                 }
-                Log.d(TAG, "${if (local) "Local" else "Remote"} renderer detached")
+                Log.d(TAG, "✅ ${if (local) "Local" else "Remote"} renderer detached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error detaching renderer", e)
             }
@@ -873,7 +911,7 @@ object WebRtcCallManager {
                     return
                 }
 
-                Log.d(TAG, "Offer created, setting local description")
+                Log.d(TAG, "✅ Offer created, setting local description")
 
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
@@ -882,13 +920,13 @@ object WebRtcCallManager {
                     }
 
                     override fun onSetFailure(error: String?) {
-                        Log.e(TAG, "Failed to set local description: $error")
+                        Log.e(TAG, "❌ Failed to set local description: $error")
                     }
                 }, desc)
             }
 
             override fun onCreateFailure(error: String?) {
-                Log.e(TAG, "Failed to create offer: $error")
+                Log.e(TAG, "❌ Failed to create offer: $error")
             }
         }, constraints)
     }
@@ -908,7 +946,7 @@ object WebRtcCallManager {
                     return
                 }
 
-                Log.d(TAG, "Answer created, setting local description")
+                Log.d(TAG, "✅ Answer created, setting local description")
 
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
@@ -917,23 +955,25 @@ object WebRtcCallManager {
                     }
 
                     override fun onSetFailure(error: String?) {
-                        Log.e(TAG, "Failed to set local description: $error")
+                        Log.e(TAG, "❌ Failed to set local description: $error")
                     }
                 }, desc)
             }
 
             override fun onCreateFailure(error: String?) {
-                Log.e(TAG, "Failed to create answer: $error")
+                Log.e(TAG, "❌ Failed to create answer: $error")
             }
         }, constraints)
     }
 
     fun applyRemoteOffer(sdp: String) {
-        Log.d(TAG, "========== APPLY REMOTE OFFER ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📥 APPLY REMOTE OFFER")
         Log.d(TAG, "SDP length: ${sdp.length}")
+        Log.d(TAG, "========================================")
 
         val p = peer ?: run {
-            Log.e(TAG, "FATAL: peer is null!")
+            Log.e(TAG, "❌ FATAL: peer is null!")
             return
         }
 
@@ -962,11 +1002,13 @@ object WebRtcCallManager {
     }
 
     fun applyRemoteAnswer(sdp: String) {
-        Log.d(TAG, "========== APPLY REMOTE ANSWER ==========")
+        Log.d(TAG, "========================================")
+        Log.d(TAG, "📥 APPLY REMOTE ANSWER")
         Log.d(TAG, "SDP length: ${sdp.length}")
+        Log.d(TAG, "========================================")
 
         val p = peer ?: run {
-            Log.e(TAG, "FATAL: peer is null!")
+            Log.e(TAG, "❌ FATAL: peer is null!")
             return
         }
 
@@ -1016,11 +1058,11 @@ object WebRtcCallManager {
     private val pcObserver = object : PeerConnection.Observer {
 
         override fun onSignalingChange(state: PeerConnection.SignalingState?) {
-            Log.d(TAG, "Signaling state: $state")
+            Log.d(TAG, "📡 Signaling state: $state")
         }
 
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
-            Log.d(TAG, "ICE connection state: $state")
+            Log.d(TAG, "🧊 ICE connection state: $state")
 
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED -> {
@@ -1038,7 +1080,7 @@ object WebRtcCallManager {
                 PeerConnection.IceConnectionState.DISCONNECTED -> {
                     mainHandler.post {
                         if (_connectionState.value == ConnectionState.CONNECTED) {
-                            Log.w(TAG, "Connection lost, attempting reconnect...")
+                            Log.w(TAG, "⚠️ Connection lost, attempting reconnect...")
                             attemptReconnect()
                         }
                     }
@@ -1056,93 +1098,100 @@ object WebRtcCallManager {
         }
 
         override fun onIceConnectionReceivingChange(receiving: Boolean) {
-            Log.d(TAG, "ICE receiving: $receiving")
+            Log.d(TAG, "🧊 ICE receiving: $receiving")
         }
 
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
-            Log.d(TAG, "ICE gathering: $state")
+            Log.d(TAG, "🧊 ICE gathering: $state")
         }
 
         override fun onIceCandidate(candidate: IceCandidate?) {
             if (candidate == null) return
-            Log.d(TAG, "Local ICE candidate: ${candidate.sdpMid}:${candidate.sdpMLineIndex}")
+            Log.d(TAG, "🧊 Local ICE candidate: ${candidate.sdpMid}:${candidate.sdpMLineIndex}")
             signalingDelegate?.onIceCandidate(currentCallId ?: return, candidate)
         }
 
         override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {
-            Log.d(TAG, "ICE candidates removed: ${candidates?.size}")
+            Log.d(TAG, "🧊 ICE candidates removed: ${candidates?.size}")
         }
 
-        override fun onAddStream(stream: org.webrtc.MediaStream?) {
-            Log.d(TAG, "onAddStream (deprecated)")
+        override fun onAddStream(stream: MediaStream?) {
+            // Не используется в Unified Plan
+            Log.d(TAG, "📺 onAddStream (not used in Unified Plan)")
         }
 
-        override fun onRemoveStream(stream: org.webrtc.MediaStream?) {
-            Log.d(TAG, "onRemoveStream (deprecated)")
+        override fun onRemoveStream(stream: MediaStream?) {
+            Log.d(TAG, "📺 onRemoveStream")
         }
 
         override fun onDataChannel(dataChannel: org.webrtc.DataChannel?) {
-            Log.d(TAG, "onDataChannel: ${dataChannel?.label()}")
+            Log.d(TAG, "📡 onDataChannel: ${dataChannel?.label()}")
         }
 
         override fun onRenegotiationNeeded() {
-            Log.d(TAG, "onRenegotiationNeeded")
+            Log.d(TAG, "🔄 onRenegotiationNeeded")
+            mainHandler.post {
+                if (currentRole == "caller") {
+                    Log.d(TAG, "Caller: handling renegotiation")
+                    createOffer()
+                }
+            }
         }
 
-        override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out org.webrtc.MediaStream>?) {
+        override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
             val track = receiver?.track() ?: return
 
-            Log.d(TAG, "========== ON ADD TRACK ==========")
-            Log.d(TAG, "Track kind: ${track.kind()}, id: ${track.id()}, enabled: ${track.enabled()}")
+            Log.d(TAG, "========================================")
+            Log.d(TAG, "🎬 ON ADD TRACK")
+            Log.d(TAG, "Track kind: ${track.kind()}")
+            Log.d(TAG, "Track id: ${track.id()}")
+            Log.d(TAG, "Track enabled: ${track.enabled()}")
+            Log.d(TAG, "========================================")
 
             mainHandler.post {
-                handleRemoteTrack(track)
+                when (track) {
+                    is VideoTrack -> {
+                        Log.d(TAG, "📹 Remote VIDEO track received")
+
+                        if (remoteVideoTrack != null) {
+                            try {
+                                val view = remoteRendererRef?.get()
+                                view?.let { remoteVideoTrack?.removeSink(it) }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error removing old sink", e)
+                            }
+                        }
+
+                        remoteVideoTrack = track
+                        track.setEnabled(true)
+                        _isRemoteVideoEnabled.value = true
+
+                        val view = remoteRendererRef?.get()
+                        if (view != null) {
+                            attachRemoteSinkTo(view)
+                            Log.d(TAG, "✅ Remote video attached to renderer")
+                        } else {
+                            Log.w(TAG, "⚠️ Remote renderer view is null!")
+                        }
+                    }
+
+                    is AudioTrack -> {
+                        track.setEnabled(true)
+                        Log.d(TAG, "✅ Remote AUDIO track enabled")
+                    }
+                }
             }
         }
 
         override fun onTrack(transceiver: RtpTransceiver?) {
             val track = transceiver?.receiver?.track() ?: return
 
-            Log.d(TAG, "========== ON TRACK ==========")
-            Log.d(TAG, "Track kind: ${track.kind()}, id: ${track.id()}, enabled: ${track.enabled()}")
-
-            mainHandler.post {
-                handleRemoteTrack(track)
-            }
-        }
-    }
-
-    private fun handleRemoteTrack(track: MediaStreamTrack) {
-        when (track) {
-            is VideoTrack -> {
-                Log.d(TAG, "Remote VIDEO track received")
-
-                if (remoteVideoTrack != null) {
-                    try {
-                        val view = remoteRendererRef?.get()
-                        view?.let { remoteVideoTrack?.removeSink(it) }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error removing old sink", e)
-                    }
-                }
-
-                remoteVideoTrack = track
-                track.setEnabled(true)
-                _isRemoteVideoEnabled.value = true
-
-                val view = remoteRendererRef?.get()
-                if (view != null) {
-                    attachRemoteSinkTo(view)
-                    Log.d(TAG, "✅ Remote video attached to renderer")
-                } else {
-                    Log.w(TAG, "Remote renderer view is null!")
-                }
-            }
-
-            is AudioTrack -> {
-                track.setEnabled(true)
-                Log.d(TAG, "✅ Remote AUDIO track enabled")
-            }
+            Log.d(TAG, "========================================")
+            Log.d(TAG, "🎬 ON TRACK")
+            Log.d(TAG, "Track kind: ${track.kind()}")
+            Log.d(TAG, "Track id: ${track.id()}")
+            Log.d(TAG, "Track enabled: ${track.enabled()}")
+            Log.d(TAG, "========================================")
         }
     }
 
@@ -1150,17 +1199,17 @@ object WebRtcCallManager {
 
     private fun attemptReconnect() {
         if (reconnectAttempt >= RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "Max reconnect attempts reached")
+            Log.e(TAG, "❌ Max reconnect attempts reached")
             mainHandler.post {
                 _connectionState.value = ConnectionState.FAILED
                 signalingDelegate?.onConnectionFailed(currentCallId ?: return@post)
-                endCallInternal(true)
+                endCallInternal(false)
             }
             return
         }
 
         reconnectAttempt++
-        Log.d(TAG, "Reconnect attempt $reconnectAttempt/$RECONNECT_ATTEMPTS")
+        Log.d(TAG, "🔄 Reconnect attempt $reconnectAttempt/$RECONNECT_ATTEMPTS")
 
         mainHandler.post {
             _connectionState.value = ConnectionState.RECONNECTING
@@ -1192,9 +1241,9 @@ object WebRtcCallManager {
     private fun startCallTimeout(callId: String) {
         timeoutRunnable = Runnable {
             if (_connectionState.value != ConnectionState.CONNECTED) {
-                Log.e(TAG, "Call timeout!")
+                Log.e(TAG, "⏰ Call timeout!")
                 signalingDelegate?.onCallTimeout(callId)
-                endCallInternal(true)
+                endCallInternal(false)
             }
         }
         mainHandler.postDelayed(timeoutRunnable!!, CALL_TIMEOUT_MS)

@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -677,32 +678,21 @@ private fun ModernCallUI(
 // ═══════════════════════════════════════════════════════════════
 //                         VIDEO VIEWS
 // ═══════════════════════════════════════════════════════════════
-
-@Composable
-private fun RemoteVideoFullScreen() {
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            SurfaceViewRenderer(ctx).apply {
-                WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
-                post {
-                    WebRtcCallManager.bindRemoteRenderer(this)
-                }
-            }
-        }
-    )
-}
-
 @Composable
 private fun LocalVideoFullScreen() {
+    var rendererReady by remember { mutableStateOf(false) }
+
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             SurfaceViewRenderer(ctx).apply {
                 WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = false)
-                post {
-                    WebRtcCallManager.bindLocalRenderer(this)
-                }
+                rendererReady = true
+            }
+        },
+        update = { view ->
+            if (rendererReady) {
+                WebRtcCallManager.bindLocalRenderer(view)
             }
         }
     )
@@ -713,6 +703,8 @@ private fun LocalVideoPip(
     modifier: Modifier,
     onSwap: () -> Unit
 ) {
+    var rendererReady by remember { mutableStateOf(false) }
+
     Surface(
         modifier = modifier
             .size(120.dp, 160.dp)
@@ -727,14 +719,16 @@ private fun LocalVideoPip(
                 factory = { ctx ->
                     SurfaceViewRenderer(ctx).apply {
                         WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
-                        post {
-                            WebRtcCallManager.bindLocalRenderer(this)
-                        }
+                        rendererReady = true
+                    }
+                },
+                update = { view ->
+                    if (rendererReady) {
+                        WebRtcCallManager.bindLocalRenderer(view)
                     }
                 }
             )
 
-            // Иконка swap
             Icon(
                 Icons.Default.SwapVert,
                 contentDescription = "Поменять",
@@ -749,10 +743,32 @@ private fun LocalVideoPip(
 }
 
 @Composable
+private fun RemoteVideoFullScreen() {
+    var rendererReady by remember { mutableStateOf(false) }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            SurfaceViewRenderer(ctx).apply {
+                WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
+                rendererReady = true
+            }
+        },
+        update = { view ->
+            if (rendererReady) {
+                WebRtcCallManager.bindRemoteRenderer(view)
+            }
+        }
+    )
+}
+
+@Composable
 private fun RemoteVideoPip(
     modifier: Modifier,
     onSwap: () -> Unit
 ) {
+    var rendererReady by remember { mutableStateOf(false) }
+
     Surface(
         modifier = modifier
             .size(120.dp, 160.dp)
@@ -767,9 +783,12 @@ private fun RemoteVideoPip(
                 factory = { ctx ->
                     SurfaceViewRenderer(ctx).apply {
                         WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = true)
-                        post {
-                            WebRtcCallManager.bindRemoteRenderer(this)
-                        }
+                        rendererReady = true
+                    }
+                },
+                update = { view ->
+                    if (rendererReady) {
+                        WebRtcCallManager.bindRemoteRenderer(view)
                     }
                 }
             )
@@ -786,7 +805,6 @@ private fun RemoteVideoPip(
         }
     }
 }
-
 // ═══════════════════════════════════════════════════════════════
 //                    AUDIO CONTENT (БЕЗ ВИДЕО)
 // ═══════════════════════════════════════════════════════════════
@@ -882,7 +900,7 @@ private fun ModernControlButton(
         val backgroundColor = if (isActive) {
             Color.White.copy(0.3f)
         } else {
-            Color(0xFFFF3B30).copy(0.9f)
+            Color(0xFFA45F5C).copy(0.9f)
         }
 
         Surface(
@@ -1066,4 +1084,93 @@ private fun formatTime(ms: Long): String {
     val m = (total % 3600) / 60
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
+@Preview(showBackground = true, name = "Audio Call - Connecting")
+@Composable
+fun ModernCallUI_Preview_Audio_Connecting() {
+    MaterialTheme {
+        ModernCallUI(
+            peerName = "Собеседник",
+            elapsedMillis = 0,
+            isMuted = false,
+            isSpeakerOn = false,
+            isLocalVideoEnabled = false,
+            isRemoteVideoEnabled = false,
+            connectionState = WebRtcCallManager.ConnectionState.CONNECTING,
+            callQuality = WebRtcCallManager.Quality.Good,
+            videoSwapped = false,
+            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Audio Call - Connected")
+@Composable
+fun ModernCallUI_Preview_Audio_Connected() {
+    MaterialTheme {
+        ModernCallUI(
+            peerName = "Иван",
+            elapsedMillis = 123000, // 2 минуты 3 секунды
+            isMuted = false,
+            isSpeakerOn = true,
+            isLocalVideoEnabled = false,
+            isRemoteVideoEnabled = false,
+            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
+            callQuality = WebRtcCallManager.Quality.Good,
+            videoSwapped = false,
+            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Video Call - Connected")
+@Composable
+fun ModernCallUI_Preview_Video_Connected() {
+    MaterialTheme {
+        ModernCallUI(
+            peerName = "Екатерина",
+            elapsedMillis = 345000, // 5 минут 45 секунд
+            isMuted = false,
+            isSpeakerOn = true,
+            isLocalVideoEnabled = true,
+            isRemoteVideoEnabled = true,
+            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
+            callQuality = WebRtcCallManager.Quality.Good,
+            videoSwapped = false,
+            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Call - Reconnecting")
+@Composable
+fun ModernCallUI_Preview_Reconnecting() {
+    MaterialTheme {
+        ModernCallUI(
+            peerName = "Алексей",
+            elapsedMillis = 88000,
+            isMuted = false,
+            isSpeakerOn = true,
+            isLocalVideoEnabled = true,
+            isRemoteVideoEnabled = false, // Remote video might be lost
+            connectionState = WebRtcCallManager.ConnectionState.RECONNECTING,
+            callQuality = WebRtcCallManager.Quality.Poor,
+            videoSwapped = false,
+            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Video Upgrade Dialog")
+@Composable
+fun ModernVideoUpgradeDialog_Preview() {
+    MaterialTheme {
+        Box(modifier = Modifier.fillMaxSize()) {
+            ModernVideoUpgradeDialog(
+                fromUsername = "Мария",
+                onAccept = {}, onDecline = {}
+            )
+        }
+    }
 }

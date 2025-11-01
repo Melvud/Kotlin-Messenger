@@ -34,7 +34,7 @@ class CallActionReceiver : BroadcastReceiver() {
                 NotificationHelper.cancelIncomingCall(ctx, callId)
 
                 // Сохраняем состояние звонка
-                OngoingCallStore.save(ctx, callId, if (isVideo) "video" else "audio", username)
+                OngoingCallStore.save(ctx, callId, isVideo, username)
 
                 // Уведомляем другие устройства
                 val auth = FirebaseAuth.getInstance()

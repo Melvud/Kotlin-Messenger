@@ -1,162 +1,29 @@
 package com.example.messenger_app.push
 
-import android.app.Notification
-import android.app.Service
+import android.annotation.SuppressLint
+import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
-// ИМПОРТ WebRtcCallManager БОЛЬШЕ НЕ НУЖЕН
-// import com.example.messenger_app.webrtc.WebRtcCallManager
-import kotlin.math.abs
 
-/**
- * Foreground-сервис звонка: держит уведомление, может проигрывать ringback.
- * ИСПРАВЛЕНО: Убрана логика инициализации соединения.
- */
-@Suppress("DEPRECATION")
 class CallService : Service() {
 
-    private var callId: String = ""
-    private var username: String = ""
-    private var isVideo: Boolean = false
-
-    private var ringback: MediaPlayer? = null
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        NotificationHelper.ensureChannels(this)
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                stopRingbackSafe()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                return START_NOT_STICKY
-            }
-
-            ACTION_STOP_RINGBACK -> {
-                stopRingbackSafe()
-                return START_NOT_STICKY
-            }
-
-            else -> {
-                // Параметры старта/рестарта сервиса
-                callId = intent?.getStringExtra(EXTRA_CALL_ID) ?: callId
-                username = intent?.getStringExtra(EXTRA_USERNAME) ?: username
-                isVideo = intent?.getBooleanExtra(EXTRA_IS_VIDEO, isVideo) ?: isVideo
-                val openUi = intent?.getBooleanExtra(EXTRA_OPEN_UI, false) ?: false
-                val playRingback = intent?.getBooleanExtra(EXTRA_PLAY_RINGBACK, false) ?: false
-                // УДАЛЕНО: val initConnection = ...
-
-                // Строим и выставляем foreground-уведомление
-                val notif = buildOngoingNotification(this, callId, username, isVideo)
-                startForeground(ongoingNotificationId(callId), notif)
-
-                // УДАЛЕНО: Блок if (initConnection) { ... }
-                // WebRtcCallManager.init(applicationContext)
-                // WebRtcCallManager.startCall(...)
-
-                // Открыть UI по требованию
-                if (openUi) {
-                    startActivity(
-                        Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            putExtra("deeplink_callId", callId)
-                            putExtra("deeplink_isVideo", isVideo)
-                            putExtra("deeplink_username", username)
-                        }
-                    )
-                }
-
-                if (playRingback) startRingbackSafe()
-            }
-        }
-        return START_STICKY
-    }
-
-    override fun onDestroy() {
-        stopRingbackSafe()
-        super.onDestroy()
-    }
-
-    /* ================= RINGBACK ================= */
-
-    private fun startRingbackSafe() {
-        if (ringback != null) return
-        ringback = MediaPlayer.create(
-            this,
-            R.raw.ringback,
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build(),
-            0
-        ).apply {
-            isLooping = true
-            start()
-        }
-    }
-
-    private fun stopRingbackSafe() {
-        try { ringback?.stop() } catch (_: Throwable) {}
-        try { ringback?.release() } catch (_: Throwable) {}
-        ringback = null
-    }
-
-    /* ================= NOTIFICATION ================= */
-
-    private fun buildOngoingNotification(
-        ctx: Context,
-        callId: String,
-        username: String,
-        isVideo: Boolean
-    ): Notification {
-        val contentIntent = PendingIntentFactory.activity(
-            ctx = ctx,
-            requestCode = 300 + abs(callId.hashCode()),
-            intent = Intent(ctx, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra("deeplink_callId", callId)
-                putExtra("deeplink_isVideo", isVideo)
-                putExtra("deeplink_username", username)
-            },
-            mutable = true
-        )
-
-        val title = if (isVideo) "Видео-звонок" else "Звонок"
-        val text = if (username.isNotBlank()) "В разговоре с $username" else "Идёт звонок"
-
-        return NotificationCompat.Builder(ctx, NotificationHelper.CHANNEL_ONGOING_CALLS)
-            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setContentIntent(contentIntent)
-            .setOngoing(true)
-            .build()
-    }
-
-    private fun ongoingNotificationId(callId: String): Int = 0x6600000 + abs(callId.hashCode())
+    private var mediaPlayer: MediaPlayer? = null
+    private var currentCallId: String? = null
 
     companion object {
-        private const val ACTION_STOP = "CallService.ACTION_STOP"
-        private const val ACTION_STOP_RINGBACK = "CallService.ACTION_STOP_RINGBACK"
-
-        const val EXTRA_CALL_ID = "callId"
-        const val EXTRA_IS_VIDEO = "isVideo"
-        const val EXTRA_USERNAME = "username"
-        const val EXTRA_OPEN_UI = "openUi"
-        const val EXTRA_PLAY_RINGBACK = "playRingback"
-        // УДАЛЕНО: const val EXTRA_INIT_CONNECTION = "initConnection"
+        private const val TAG = "CallService"
+        private const val CHANNEL_ID = "ongoing_call_channel"
+        private const val NOTIFICATION_ID = 1001
 
         fun start(
             ctx: Context,
@@ -165,43 +32,220 @@ class CallService : Service() {
             isVideo: Boolean,
             openUi: Boolean = false,
             playRingback: Boolean = false
-            // УДАЛЕНО: initializeConnection: Boolean = false
         ) {
-            NotificationHelper.ensureChannels(ctx)
-            val i = Intent(ctx, CallService::class.java).apply {
-                putExtra(EXTRA_CALL_ID, callId)
-                putExtra(EXTRA_USERNAME, username)
-                putExtra(EXTRA_IS_VIDEO, isVideo)
-                putExtra(EXTRA_OPEN_UI, openUi)
-                putExtra(EXTRA_PLAY_RINGBACK, playRingback)
-                // УДАЛЕНО: putExtra(EXTRA_INIT_CONNECTION, initializeConnection)
+            val intent = Intent(ctx, CallService::class.java).apply {
+                putExtra("callId", callId)
+                putExtra("username", username)
+                putExtra("isVideo", isVideo)
+                putExtra("openUi", openUi)
+                putExtra("playRingback", playRingback)
             }
-            ContextCompat.startForegroundService(ctx, i)
+
+            try {
+                ContextCompat.startForegroundService(ctx, intent)
+                Log.d(TAG, "✅ Service start requested for callId=$callId")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to start service", e)
+            }
         }
 
         fun stop(ctx: Context) {
-            val i = Intent(ctx, CallService::class.java).apply { action = ACTION_STOP }
-            ContextCompat.startForegroundService(ctx, i)
+            try {
+                ctx.stopService(Intent(ctx, CallService::class.java))
+                Log.d(TAG, "✅ Service stop requested")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to stop service", e)
+            }
         }
 
         fun stopRingback(ctx: Context) {
-            val i = Intent(ctx, CallService::class.java).apply { action = ACTION_STOP_RINGBACK }
-            ctx.startService(i)
+            try {
+                val intent = Intent(ctx, CallService::class.java).apply {
+                    action = "STOP_RINGBACK"
+                }
+                ctx.startService(intent)
+                Log.d(TAG, "✅ Stop ringback requested")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to stop ringback", e)
+            }
         }
     }
-}
 
-/** Утилита для PendingIntent без ворнингов по флагам. */
-private object PendingIntentFactory {
-    fun activity(
-        ctx: Context,
-        requestCode: Int,
-        intent: Intent,
-        mutable: Boolean = false
-    ): android.app.PendingIntent {
-        val flags =
-            (if (mutable) android.app.PendingIntent.FLAG_MUTABLE else android.app.PendingIntent.FLAG_IMMUTABLE) or
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT
-        return android.app.PendingIntent.getActivity(ctx, requestCode, intent, flags)
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "📱 Service onCreate()")
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "📱 Service onStartCommand: action=${intent?.action}")
+
+        // ✅ КРИТИЧЕСКИ ВАЖНО: НЕМЕДЛЕННО ВЫЗЫВАЕМ startForeground()
+        if (intent?.action == null || intent.action != "STOP_RINGBACK") {
+            val callId = intent?.getStringExtra("callId") ?: currentCallId ?: "unknown"
+            val username = intent?.getStringExtra("username") ?: "Звонок"
+            val isVideo = intent?.getBooleanExtra("isVideo", false) ?: false
+
+            val notification = buildNotification(callId, username, isVideo)
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        when (intent?.action) {
+            "STOP_RINGBACK" -> {
+                stopRingback()
+                return START_NOT_STICKY
+            }
+            else -> {
+                handleCallStart(intent)
+            }
+        }
+
+        return START_STICKY
+    }
+
+    private fun handleCallStart(intent: Intent?) {
+        val callId = intent?.getStringExtra("callId") ?: return
+        val username = intent.getStringExtra("username") ?: "Собеседник"
+        val isVideo = intent.getBooleanExtra("isVideo", false)
+        val playRingback = intent.getBooleanExtra("playRingback", false)
+
+        currentCallId = callId
+
+        OngoingCallStore.save(this, callId, isVideo, username)
+
+        Log.d(TAG, """
+            ════════════════════════════════════
+            📞 CALL SERVICE STARTED
+            callId: $callId
+            username: $username
+            isVideo: $isVideo
+            playRingback: $playRingback
+            ════════════════════════════════════
+        """.trimIndent())
+
+        if (playRingback) {
+            startRingbackTone()
+        }
+    }
+
+    private fun startRingbackTone() {
+        try {
+            stopRingback()
+
+            mediaPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .build()
+                )
+
+                setDataSource(this@CallService, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
+                isLooping = true
+                prepare()
+                start()
+            }
+
+            Log.d(TAG, "🔊 Ringback tone started")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to start ringback", e)
+        }
+    }
+
+    private fun stopRingback() {
+        try {
+            mediaPlayer?.let {
+                if (it.isPlaying) {
+                    it.stop()
+                }
+                it.release()
+            }
+            mediaPlayer = null
+            Log.d(TAG, "🔇 Ringback stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping ringback", e)
+        }
+    }
+
+    override fun onDestroy() {
+        Log.d(TAG, "📱 Service onDestroy()")
+        stopRingback()
+        OngoingCallStore.clear(this)
+
+        // ✅ БЕЗОПАСНОЕ УДАЛЕНИЕ FOREGROUND
+        try {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping foreground", e)
+        }
+
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    // ════════════════════════════════════════════════════════════
+    //                     NOTIFICATION
+    // ════════════════════════════════════════════════════════════
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Активный звонок",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Уведомления для активных звонков"
+                setSound(null, null)
+                enableVibration(false)
+            }
+
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+            Log.d(TAG, "✅ Notification channel created")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun buildNotification(callId: String, username: String, isVideo: Boolean): Notification {
+        val hangupIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_HANGUP
+            putExtra("callId", callId)
+        }
+        val hangupPending = PendingIntent.getBroadcast(
+            this, 1, hangupIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val muteIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_TOGGLE_MUTE
+        }
+        val mutePending = PendingIntent.getBroadcast(
+            this, 2, muteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val speakerIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_TOGGLE_SPEAKER
+        }
+        val speakerPending = PendingIntent.getBroadcast(
+            this, 3, speakerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(if (isVideo) "Видеозвонок" else "Звонок")
+            .setContentText(username)
+            .setSmallIcon(R.drawable.ic_call)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setSound(null)
+            .setVibrate(null)
+            .addAction(R.drawable.ic_mic, "Микрофон", mutePending)
+            .addAction(R.drawable.ic_speaker, "Динамик", speakerPending)
+            .addAction(R.drawable.ic_hangup, "Завершить", hangupPending)
+            .setFullScreenIntent(hangupPending, true)
+            .build()
     }
 }

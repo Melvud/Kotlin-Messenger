@@ -10,9 +10,9 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
-import androidx.core.graphics.drawable.IconCompat
 import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -38,11 +38,38 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         }
     }
 
+    /**
+     * ИСПРАВЛЕНО: Не показываем уведомление если звонок от нас самих
+     */
     private fun handleCallNotification(data: Map<String, String>) {
         val callId = data["callId"] ?: data["id"] ?: return
         val rawType = (data["callType"] ?: data["type"] ?: "audio").lowercase()
         val isVideo = rawType == "video" || data["isVideo"] == "true"
         val fromUsername = data["fromUsername"] ?: data["fromName"] ?: data["caller"] ?: ""
+        val fromUserId = data["fromUserId"] ?: ""
+        val toUserId = data["toUserId"] ?: ""
+
+        // ИСПРАВЛЕНИЕ: проверяем, что уведомление для нас
+        val currentUserId = FirebaseAuth.getInstance().currentUser?.uid
+
+        if (currentUserId.isNullOrBlank()) {
+            Log.w("FCM", "User not authenticated, ignoring call notification")
+            return
+        }
+
+        // КРИТИЧЕСКАЯ ПРОВЕРКА: показываем уведомление только если мы получатель
+        if (currentUserId != toUserId) {
+            Log.w("FCM", "Ignoring call notification: not for us (to=$toUserId, me=$currentUserId)")
+            return
+        }
+
+        // Дополнительная проверка: не показываем если звонок от нас
+        if (currentUserId == fromUserId) {
+            Log.w("FCM", "Ignoring call notification: from self")
+            return
+        }
+
+        Log.d("FCM", "✅ Incoming call: from=$fromUsername ($fromUserId), video=$isVideo")
 
         NotificationHelper.showIncomingCall(
             ctx = applicationContext,
@@ -52,9 +79,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         )
     }
 
-    /**
-     * УЛУЧШЕНО: Красивое уведомление о сообщении
-     */
     private fun handleMessageNotification(message: RemoteMessage) {
         val data = message.data
         val chatId = data["chatId"] ?: return
@@ -62,7 +86,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         val senderName = data["senderName"] ?: "Пользователь"
         val messageType = data["messageType"] ?: "TEXT"
 
-        // Используем notification payload если есть, иначе из data
         val title = message.notification?.title ?: senderName
         val body = message.notification?.body ?: data["content"] ?: "Новое сообщение"
 
@@ -94,9 +117,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         Log.d("FCM", "Video upgrade request from $fromUsername for call $callId")
     }
 
-    /**
-     * УЛУЧШЕНО: Показать красивое уведомление о сообщении
-     */
     private fun showMessageNotification(
         chatId: String,
         senderId: String,
@@ -108,7 +128,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         val notificationId = chatId.hashCode()
 
-        // Intent для открытия чата
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("action", "open_chat")
@@ -129,13 +148,11 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
-        // Создаем Person для стиля MessagingStyle
         val person = Person.Builder()
             .setName(senderName)
             .setKey(senderId)
             .build()
 
-        // Используем MessagingStyle для красивого отображения
         val messagingStyle = NotificationCompat.MessagingStyle(person)
             .setConversationTitle(senderName)
             .addMessage(
@@ -143,16 +160,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 System.currentTimeMillis(),
                 person
             )
-
-        // Определяем эмодзи для разных типов сообщений
-        val largeIcon = when (messageType) {
-            "IMAGE" -> "📷"
-            "VIDEO" -> "🎬"
-            "FILE" -> "📎"
-            "VOICE" -> "🎤"
-            "STICKER" -> "😊"
-            else -> null
-        }
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_notification)
@@ -162,19 +169,13 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setColor(0x2AABEE) // Telegram blue
+            .setColor(0x2AABEE)
             .setGroup(MESSAGES_GROUP)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
-
-        // Добавляем большую иконку для специальных типов
-        if (largeIcon != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // Можно добавить иконку, если нужно
-        }
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(notificationId, notificationBuilder.build())
 
-        // Создаем summary notification для группировки
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             val summaryNotification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
                 .setSmallIcon(R.drawable.ic_notification)
@@ -201,7 +202,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 enableVibration(true)
                 setShowBadge(true)
                 enableLights(true)
-                lightColor = 0x2AABEE // Telegram blue
+                lightColor = 0x2AABEE
             }
 
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

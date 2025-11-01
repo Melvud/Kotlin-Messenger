@@ -21,11 +21,15 @@ class CallsRepository(
 ) {
 
     /**
-     * Создаёт документ звонка и СРАЗУ шлёт push-уведомление адресату через callable
-     * Cloud Function "sendCallNotification".
+     * ИСПРАВЛЕНО: Проверяем, что не звоним сами себе
      */
     suspend fun startCall(calleeUid: String, callType: String): CallInfo {
         val me = auth.currentUser?.uid ?: error("Not authorized")
+
+        // Проверка: нельзя звонить самому себе
+        if (me == calleeUid) {
+            error("Cannot call yourself")
+        }
 
         // 1) создаём документ звонка
         val callRef = db.collection("calls").document()
@@ -45,15 +49,19 @@ class CallsRepository(
         val fromUsername =
             meSnap?.getString("username")
                 ?: meSnap?.getString("name")
-                ?: me // пусть будет uid, если профиля нет
+                ?: "Пользователь"
 
-        // 3) вызовем функцию отправки пуша
+        // 3) ИСПРАВЛЕНО: отправляем пуш ТОЛЬКО адресату
         val data = mapOf(
             "toUserId" to calleeUid,
+            "fromUserId" to me,
             "fromUsername" to fromUsername,
             "callId" to callRef.id,
             "callType" to callType
         )
+
+        Log.d("CallsRepository", "Sending call notification: caller=$me, callee=$calleeUid, type=$callType")
+
         runCatching {
             FirebaseFunctions.getInstance()
                 .getHttpsCallable("sendCallNotification")
@@ -106,7 +114,6 @@ class CallsRepository(
 
     /**
      * Сообщить другим устройствам того же пользователя, что этот экземпляр принял звонок
-     * (вызывается в CallActionReceiver / MainActivity).
      */
     suspend fun hangupOtherDevices(callId: String) {
         val acceptedToken = FirebaseMessaging.getInstance().token.await()

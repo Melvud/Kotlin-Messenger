@@ -14,19 +14,41 @@ type DeviceDoc = {
 };
 
 /**
- * ОТПРАВКА ВЫЗОВА (без изменений)
+ * ✅ ИСПРАВЛЕНО: Проверяем что fromUserId != toUserId
  */
 export const sendCallNotification = onCall(async (request) => {
-  const { toUserId, fromUsername, callId, callType } = request.data || {};
-  console.log("[sendCallNotification] Params:", { toUserId, fromUsername, callId, callType });
+  const { toUserId, fromUserId, fromUsername, callId, callType } = request.data || {};
+
+  console.log("[sendCallNotification] ====================================");
+  console.log("[sendCallNotification] Incoming request:", {
+    toUserId,
+    fromUserId,
+    fromUsername,
+    callId,
+    callType
+  });
+  console.log("[sendCallNotification] ====================================");
 
   if (!toUserId || !callId || !fromUsername || !callType) {
     throw new HttpsError("invalid-argument", "toUserId, fromUsername, callId, callType are required");
   }
 
+  // ✅✅✅ КРИТИЧЕСКАЯ ПРОВЕРКА: не звоним сами себе
+  if (fromUserId && toUserId === fromUserId) {
+    console.warn("[sendCallNotification] ❌ REJECTED: Attempted to call self!");
+    console.warn("[sendCallNotification] fromUserId:", fromUserId);
+    console.warn("[sendCallNotification] toUserId:", toUserId);
+    throw new HttpsError("invalid-argument", "Cannot call yourself");
+  }
+
+  console.log("[sendCallNotification] ✅ Validation passed: fromUserId != toUserId");
+
   const db = getFirestore();
 
+  // ✅ Получаем устройства ТОЛЬКО получателя
+  console.log("[sendCallNotification] Fetching devices for toUserId:", toUserId);
   const devicesSnap = await db.collection("users").doc(toUserId).collection("devices").get();
+
   const tokens: string[] = [];
   const tokenToDocRef: Record<string, DocumentReference> = {};
 
@@ -39,30 +61,45 @@ export const sendCallNotification = onCall(async (request) => {
     }
   });
 
-  console.log("[sendCallNotification] tokens count:", tokens.length);
+  console.log("[sendCallNotification] Found tokens:", tokens.length);
 
   if (tokens.length === 0) {
-    console.error("[sendCallNotification] No FCM tokens for user:", toUserId);
-    throw new HttpsError("not-found", "FCM tokens not found");
+    console.error("[sendCallNotification] ❌ No FCM tokens for user:", toUserId);
+    throw new HttpsError("not-found", "FCM tokens not found for recipient");
   }
 
+  // ✅ Отправляем push ТОЛЬКО получателю
   const multicast = {
     tokens,
     data: {
       type: "call",
       callId: String(callId),
+      fromUserId: String(fromUserId || ""),
+      toUserId: String(toUserId), // ✅ Добавляем для двойной проверки
       fromUsername: String(fromUsername),
-      callType: String(callType)
+      callType: String(callType),
+      isVideo: String(callType === "video")
     },
-    android: { priority: "high" as const },
-    apns: { headers: { "apns-priority": "10" } }
+    android: {
+      priority: "high" as const,
+      ttl: 30000 // 30 секунд
+    },
+    apns: {
+      headers: {
+        "apns-priority": "10",
+        "apns-expiration": String(Math.floor(Date.now() / 1000) + 30)
+      }
+    }
   };
 
+  console.log("[sendCallNotification] Sending to tokens:", tokens);
   const res = await getMessaging().sendEachForMulticast(multicast);
-  console.log(
-    `[sendCallNotification] sent: success=${res.successCount}, failure=${res.failureCount}`
-  );
 
+  console.log("[sendCallNotification] ====================================");
+  console.log("[sendCallNotification] ✅ Result: success=" + res.successCount + ", failure=" + res.failureCount);
+  console.log("[sendCallNotification] ====================================");
+
+  // Очищаем невалидные токены
   const invalidDocRefs: DocumentReference[] = [];
   res.responses.forEach((r, i) => {
     if (!r.success) {
@@ -87,8 +124,12 @@ export const sendCallNotification = onCall(async (request) => {
     console.log("[sendCallNotification] Removed invalid device docs:", invalidDocRefs.length);
   }
 
+  // Сохраняем токены в документ звонка
   try {
-    await db.collection("calls").doc(callId).set({ calleeFcmTokens: tokens }, { merge: true });
+    await db.collection("calls").doc(callId).set({
+      calleeFcmTokens: tokens,
+      notificationSentAt: new Date()
+    }, { merge: true });
   } catch (e) {
     console.warn("[sendCallNotification] failed to write calleeFcmTokens:", e);
   }
@@ -97,7 +138,7 @@ export const sendCallNotification = onCall(async (request) => {
 });
 
 /**
- * ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ (без изменений)
+ * ✅ ОТКЛЮЧЕНИЕ ЗВОНКА НА ДРУГИХ УСТРОЙСТВАХ
  */
 export const hangupOtherDevices = onCall(async (request) => {
   const { callId, acceptedToken } = request.data || {};
@@ -124,6 +165,7 @@ export const hangupOtherDevices = onCall(async (request) => {
   const devicesSnap = await db.collection("users").doc(String(calleeUid)).collection("devices").get();
   const tokens: string[] = [];
   const tokenToDocRef: Record<string, DocumentReference> = {};
+
   devicesSnap.docs.forEach((d) => {
     const t = (d.data() as DeviceDoc).token;
     if (typeof t === "string" && t.length > 0 && t !== acceptedToken) {
@@ -163,7 +205,7 @@ export const hangupOtherDevices = onCall(async (request) => {
       console.warn("[hangupOtherDevices] send error:", token, code, msg);
       if (
         code === "messaging/registration-token-not-registered" ||
-        code === "messaging/invalid-token"
+        code === "messaging/invalid-registration-token"
       ) {
         const ref = tokenToDocRef[token];
         if (ref) invalidDocRefs.push(ref);
@@ -182,9 +224,7 @@ export const hangupOtherDevices = onCall(async (request) => {
 });
 
 /**
- * ИСПРАВЛЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
- * - Проверяет activeChat получателя
- * - НЕ обновляет статус сообщения (это делает клиент)
+ * ✅ ИСПРАВЛЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
  */
 export const sendMessageNotification = onDocumentCreated(
   "chats/{chatId}/messages/{messageId}",
@@ -200,20 +240,18 @@ export const sendMessageNotification = onDocumentCreated(
 
     console.log(`[sendMessageNotification] New message ${messageId} from ${senderId} in chat ${chatId}`);
 
-    // Не отправляем уведомление если сообщение уже прочитано
     if (messageStatus === "READ") {
       console.log("[sendMessageNotification] Message already READ, skipping");
       return;
     }
 
-    // Форматируем контент
     const contentMap: Record<string, string> = {
       TEXT: message.content || "Сообщение",
       IMAGE: "📷 Фото",
       VIDEO: "🎬 Видео",
       FILE: "📎 Файл",
       VOICE: "🎤 Голосовое",
-      STICKER: "Стикер",
+      STICKER: "😊 Стикер",
     };
 
     const content = contentMap[String(messageType)] || "Сообщение";
@@ -223,7 +261,6 @@ export const sendMessageNotification = onDocumentCreated(
 
     const db = getFirestore();
 
-    // Получаем чат
     const chatDoc = await db.collection("chats").doc(chatId).get();
     if (!chatDoc.exists) {
       console.error("[sendMessageNotification] Chat not found:", chatId);
@@ -239,39 +276,49 @@ export const sendMessageNotification = onDocumentCreated(
       return;
     }
 
-    // Собираем токены с фильтрацией по activeChat
     const allTokens: string[] = [];
     const tokenToDocRef: Record<string, DocumentReference> = {};
+    let hasDeliveredToAnyone = false;
 
     for (const recipientId of recipients) {
-      // Проверяем activeChat
       const userDoc = await db.collection("users").doc(recipientId).get();
       const activeChat = userDoc.data()?.activeChat;
 
       if (activeChat === chatId) {
-        console.log(`[sendMessageNotification] User ${recipientId} is in active chat, skipping`);
+        console.log(`[sendMessageNotification] User ${recipientId} is in active chat, skipping notification`);
+        hasDeliveredToAnyone = true;
         continue;
       }
 
-      // Собираем токены
       const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
       devicesSnap.docs.forEach((d) => {
         const t = (d.data() as DeviceDoc).token;
         if (typeof t === "string" && t.length > 0) {
           allTokens.push(t);
           tokenToDocRef[t] = d.ref;
+          hasDeliveredToAnyone = true;
         }
       });
     }
 
     console.log(`[sendMessageNotification] Sending to ${allTokens.length} devices`);
 
+    if (hasDeliveredToAnyone && messageStatus === "SENT") {
+      try {
+        await db.collection("chats").doc(chatId).collection("messages").doc(messageId).update({
+          status: "DELIVERED"
+        });
+        console.log(`[sendMessageNotification] Message ${messageId} -> DELIVERED`);
+      } catch (e) {
+        console.warn("[sendMessageNotification] Failed to update status:", e);
+      }
+    }
+
     if (allTokens.length === 0) {
-      console.log("[sendMessageNotification] No tokens (all users in active chat)");
+      console.log("[sendMessageNotification] No tokens to send");
       return;
     }
 
-    // Отправляем уведомление
     const multicast = {
       tokens: allTokens,
       notification: {
@@ -284,7 +331,8 @@ export const sendMessageNotification = onDocumentCreated(
         messageId: String(messageId),
         senderId: String(senderId),
         senderName: String(senderName),
-        messageType: String(messageType)
+        messageType: String(messageType),
+        content: String(message.content || content)
       },
       android: {
         priority: "high" as const,
@@ -308,7 +356,8 @@ export const sendMessageNotification = onDocumentCreated(
               title: senderName,
               body: notificationBody
             },
-            "thread-id": chatId
+            "thread-id": chatId,
+            category: "MESSAGE_CATEGORY"
           }
         }
       }
@@ -319,7 +368,6 @@ export const sendMessageNotification = onDocumentCreated(
       `[sendMessageNotification] sent: success=${res.successCount}, failure=${res.failureCount}`
     );
 
-    // Удаляем невалидные токены
     const invalidDocRefs: DocumentReference[] = [];
     res.responses.forEach((r, i) => {
       if (!r.success) {
@@ -345,56 +393,7 @@ export const sendMessageNotification = onDocumentCreated(
 );
 
 /**
- * ИСПРАВЛЕНО: Автоматическое обновление статуса на DELIVERED
- * Срабатывает когда сообщение создано и есть активные устройства
- */
-export const updateMessageDeliveryStatus = onDocumentCreated(
-  "chats/{chatId}/messages/{messageId}",
-  async (event) => {
-    const message = event.data?.data();
-    if (!message) return;
-
-    const { chatId, messageId } = event.params;
-    const senderId = message.senderId;
-    const status = message.status;
-
-    // Только для SENT сообщений
-    if (status !== "SENT") {
-      console.log(`[updateMessageDeliveryStatus] Message ${messageId} status is ${status}, skipping`);
-      return;
-    }
-
-    const db = getFirestore();
-
-    // Получаем участников
-    const chatDoc = await db.collection("chats").doc(chatId).get();
-    if (!chatDoc.exists) return;
-
-    const participants = (chatDoc.data()?.participants || []) as string[];
-    const recipients = participants.filter(p => p !== senderId);
-
-    // Проверяем активные устройства
-    let hasActiveDevice = false;
-    for (const recipientId of recipients) {
-      const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
-      if (!devicesSnap.empty) {
-        hasActiveDevice = true;
-        break;
-      }
-    }
-
-    // Обновляем на DELIVERED
-    if (hasActiveDevice) {
-      await db.collection("chats").doc(chatId).collection("messages").doc(messageId).update({
-        status: "DELIVERED"
-      });
-      console.log(`[updateMessageDeliveryStatus] Message ${messageId} -> DELIVERED`);
-    }
-  }
-);
-
-/**
- * Автоматическое завершение звонков по таймауту (без изменений)
+ * ✅ Автоматическое завершение звонков по таймауту
  */
 export const autoEndCallOnTimeout = onDocumentUpdated(
   "calls/{callId}",
@@ -444,12 +443,33 @@ export const autoEndCallOnTimeout = onDocumentUpdated(
           });
         }
       }
+
+      const calleeUid = after.calleeUid;
+      if (calleeUid && calleeUid !== callerUid) {
+        const devicesSnap = await db.collection("users").doc(String(calleeUid)).collection("devices").get();
+        const tokens: string[] = [];
+        devicesSnap.docs.forEach((d) => {
+          const t = (d.data() as DeviceDoc).token;
+          if (typeof t === "string" && t.length > 0) tokens.push(t);
+        });
+
+        if (tokens.length > 0) {
+          await getMessaging().sendEachForMulticast({
+            tokens,
+            data: {
+              type: "call_timeout",
+              callId: String(event.params.callId)
+            },
+            android: { priority: "high" as const }
+          });
+        }
+      }
     }
   }
 );
 
 /**
- * Уведомление о запросе перехода на видео (без изменений)
+ * ✅ Уведомление о запросе перехода на видео
  */
 export const notifyVideoUpgrade = onDocumentUpdated(
   "calls/{callId}",
@@ -490,7 +510,8 @@ export const notifyVideoUpgrade = onDocumentUpdated(
               callId: String(event.params.callId),
               fromUsername: String(fromUsername)
             },
-            android: { priority: "high" as const }
+            android: { priority: "high" as const },
+            apns: { headers: { "apns-priority": "10" } }
           });
 
           console.log(`[notifyVideoUpgrade] Sent video upgrade notification to ${tokens.length} devices`);
