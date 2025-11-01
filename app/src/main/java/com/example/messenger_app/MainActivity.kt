@@ -19,17 +19,14 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navDeepLink
 import com.example.messenger_app.data.CallsRepository
-import com.example.messenger_app.push.CallService
 import com.example.messenger_app.push.FcmTokenManager
 import com.example.messenger_app.push.NotificationHelper
-import com.example.messenger_app.push.OngoingCallStore
 import com.example.messenger_app.ui.auth.AuthScreen
 import com.example.messenger_app.ui.call.CallScreen
 import com.example.messenger_app.ui.chats.ChatScreen
 import com.example.messenger_app.ui.chats.ChatsListScreen
 import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.update.AppUpdateManager
-import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
@@ -51,9 +48,9 @@ object Routes {
         return "chats/$id/$otherUserId/$encoded"
     }
 
-    fun callRoute(callId: String, isVideo: Boolean, otherUsername: String): String {
+    fun callRoute(callId: String, isVideo: Boolean, otherUsername: String, playRingback: Boolean = true): String {
         val encoded = Uri.encode(otherUsername)
-        return "call/$callId?isVideo=$isVideo&playRingback=true&otherUsername=$encoded"
+        return "call/$callId?isVideo=$isVideo&playRingback=$playRingback&otherUsername=$encoded"
     }
 }
 
@@ -64,34 +61,32 @@ class MainActivity : ComponentActivity() {
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
-    // Storage for pending intent to process after permissions are granted
+    // Хранилище для отложенного intent после получения разрешений
     private var pendingIntent: Intent? = null
+    private var permissionsRequested = false
 
-    // Permission launcher for requesting call and notification permissions
+    // Лаунчер для запроса разрешений
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // Log permission results
-        permissions.entries.forEach {
-            android.util.Log.d("Permissions", "${it.key} = ${it.value}")
-        }
-        
-        // Process pending intent if all required permissions were granted
+        android.util.Log.d("MainActivity", "Permissions result: $permissions")
+
+        // Обрабатываем отложенный intent если все разрешения получены
         val allGranted = permissions.values.all { it }
-        if (allGranted) {
-            pendingIntent?.let { intent ->
-                android.util.Log.d("Permissions", "All permissions granted, processing pending intent")
-                pendingIntent = null
-                intentEvents.tryEmit(intent)
-            }
-        } else {
-            android.util.Log.w("Permissions", "Not all permissions granted")
+        if (allGranted && pendingIntent != null) {
+            android.util.Log.d("MainActivity", "All permissions granted, processing pending intent")
+            val intent = pendingIntent
+            pendingIntent = null
+            intent?.let { intentEvents.tryEmit(it) }
+        } else if (!allGranted) {
+            android.util.Log.w("MainActivity", "Some permissions denied: ${permissions.filter { !it.value }}")
             pendingIntent = null
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        android.util.Log.d("MainActivity", "onNewIntent: action=${intent.action}, extras=${intent.extras?.keySet()}")
         setIntent(intent)
         intentEvents.tryEmit(intent)
     }
@@ -99,8 +94,9 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.util.Log.d("MainActivity", "onCreate")
 
-        // НОВОЕ: Запрашиваем все необходимые разрешения
+        // Запрашиваем необходимые разрешения при старте
         requestNecessaryPermissions()
 
         setContent {
@@ -111,6 +107,7 @@ class MainActivity : ComponentActivity() {
                 val isAuthed = FirebaseAuth.getInstance().currentUser != null
                 val startDest = if (isAuthed) Routes.CHATS_LIST else Routes.AUTH
 
+                // Проверка обновлений
                 LaunchedEffect(Unit) {
                     AppUpdateManager.checkForUpdateAndPrompt(this@MainActivity)
                 }
@@ -118,12 +115,15 @@ class MainActivity : ComponentActivity() {
                 Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { _ ->
                     NavHost(navController = navController, startDestination = startDest) {
 
+                        // Экран авторизации
                         composable(Routes.AUTH) {
                             AuthScreen(
                                 onAuthed = {
                                     CoroutineScope(Dispatchers.IO).launch {
                                         runCatching {
                                             FcmTokenManager.ensureCurrentTokenRegistered(applicationContext)
+                                        }.onFailure { e ->
+                                            android.util.Log.e("MainActivity", "FCM token registration failed", e)
                                         }
                                     }
                                     navController.navigate(Routes.CHATS_LIST) {
@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
+                        // Список чатов
                         composable(Routes.CHATS_LIST) {
                             ChatsListScreen(
                                 onChatClick = { chatId, otherUserId, otherUserName ->
@@ -147,6 +148,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
+                        // Экран чата
                         composable(
                             route = Routes.CHAT,
                             arguments = listOf(
@@ -166,24 +168,35 @@ class MainActivity : ComponentActivity() {
                                 otherUserName = otherUserName,
                                 onBack = { navController.popBackStack() },
                                 onAudioCall = { callId ->
-                                    // Проверяем разрешения перед звонком
-                                    if (checkCallPermissions()) {
-                                        navController.navigate(Routes.callRoute(callId, false, otherUserName))
+                                    if (checkCallPermissions(includeCamera = false)) {
+                                        navController.navigate(
+                                            Routes.callRoute(callId, false, otherUserName, playRingback = true)
+                                        )
                                     } else {
-                                        requestCallPermissions()
+                                        android.util.Log.w("MainActivity", "Audio call permissions not granted")
+                                        CoroutineScope(Dispatchers.Main).launch {
+                                            snackbarHostState.showSnackbar("Необходимо разрешение на микрофон")
+                                        }
+                                        requestCallPermissions(includeCamera = false)
                                     }
                                 },
                                 onVideoCall = { callId ->
-                                    // Проверяем разрешения перед звонком
                                     if (checkCallPermissions(includeCamera = true)) {
-                                        navController.navigate(Routes.callRoute(callId, true, otherUserName))
+                                        navController.navigate(
+                                            Routes.callRoute(callId, true, otherUserName, playRingback = true)
+                                        )
                                     } else {
+                                        android.util.Log.w("MainActivity", "Video call permissions not granted")
+                                        CoroutineScope(Dispatchers.Main).launch {
+                                            snackbarHostState.showSnackbar("Необходимы разрешения на камеру и микрофон")
+                                        }
                                         requestCallPermissions(includeCamera = true)
                                     }
                                 }
                             )
                         }
 
+                        // Экран звонка
                         composable(
                             route = Routes.CALL_ROUTE,
                             arguments = listOf(
@@ -194,8 +207,7 @@ class MainActivity : ComponentActivity() {
                             ),
                             deepLinks = listOf(
                                 navDeepLink {
-                                    uriPattern =
-                                        "${Routes.CALL_DEEPLINK_BASE}?isVideo={isVideo}&playRingback={playRingback}&otherUsername={otherUsername}"
+                                    uriPattern = "${Routes.CALL_DEEPLINK_BASE}?isVideo={isVideo}&playRingback={playRingback}&otherUsername={otherUsername}"
                                 }
                             )
                         ) { entry ->
@@ -230,14 +242,15 @@ class MainActivity : ComponentActivity() {
                     CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance())
                 }
 
-
+                // Функция обработки Intent
                 fun handleIntent(i: Intent) {
+                    android.util.Log.d("MainActivity", "handleIntent: action=${i.action}, extras=${i.extras?.keySet()}")
+
                     val action = i.getStringExtra("action")
                     val callId = i.getStringExtra("callId")
                     val type = i.getStringExtra("type") ?: "audio"
                     val fromName = i.getStringExtra("username") ?: ""
                     val isVideoFromIntent = i.getBooleanExtra("isVideo", false)
-                    val role = i.getStringExtra("role") // НОВОЕ: получаем роль
 
                     val deepId = i.getStringExtra("deeplink_callId")
                     val deepIsVideo = i.getBooleanExtra("deeplink_isVideo", false)
@@ -249,72 +262,94 @@ class MainActivity : ComponentActivity() {
                     val otherUserNameToOpen = i.getStringExtra("otherUserName")
 
                     when {
+                        // Принятие звонка
                         action == "accept" && !callId.isNullOrBlank() -> {
                             val isVideo = isVideoFromIntent || type.equals("video", ignoreCase = true)
+                            android.util.Log.d("MainActivity", "Accept call: callId=$callId, isVideo=$isVideo")
 
-                            // Проверяем разрешения перед принятием звонка
+                            // Проверяем разрешения
                             if (!checkCallPermissions(includeCamera = isVideo)) {
-                                android.util.Log.d("MainActivity", "Permissions not granted, saving intent for later")
-                                // ✅ FIX: Don't request permissions again if already requested in onCreate
-                                // Just save the intent and wait for the permission callback
+                                android.util.Log.d("MainActivity", "Permissions not granted, saving intent")
                                 pendingIntent = i
+                                requestCallPermissions(includeCamera = isVideo)
                                 return
                             }
 
-                            // ИСПРАВЛЕНИЕ: Не запускаем CallService здесь!
-                            // CallScreen сам запустит CallService с правильными параметрами
+                            android.util.Log.d("MainActivity", "Permissions OK, navigating to CallScreen")
 
-                            android.util.Log.d("MainActivity", "Permissions granted, accepting call: $callId")
+                            // Отменяем уведомление
+                            NotificationHelper.cancelIncomingCall(applicationContext, callId)
 
-                            // ИСПРАВЛЕНИЕ: Навигируем на CallScreen с правильными параметрами
-                            // Для входящего звонка: playRingback = false, role = callee
+                            // Навигация на экран звонка (входящий звонок - без ringback)
                             navController.navigate(
-                                "call/$callId?isVideo=$isVideo&playRingback=false&otherUsername=${
-                                    android.net.Uri.encode(fromName)
-                                }"
+                                Routes.callRoute(callId, isVideo, fromName, playRingback = false)
                             ) {
                                 launchSingleTop = true
                             }
                         }
 
+                        // Отклонение звонка
+                        action == "decline" && !callId.isNullOrBlank() -> {
+                            android.util.Log.d("MainActivity", "Decline call: callId=$callId")
+                            NotificationHelper.cancelIncomingCall(applicationContext, callId)
+                            CoroutineScope(Dispatchers.IO).launch {
+                                runCatching {
+                                    callsRepo.updateStatus(callId, "declined")
+                                }.onFailure { e ->
+                                    android.util.Log.e("MainActivity", "Failed to update call status", e)
+                                }
+                            }
+                        }
+
+                        // Открытие чата из уведомления
                         openChat && !chatIdToOpen.isNullOrBlank() && !otherUserIdToOpen.isNullOrBlank() -> {
+                            android.util.Log.d("MainActivity", "Open chat: chatId=$chatIdToOpen")
                             val userName = otherUserNameToOpen ?: "User"
                             navController.navigate(Routes.chatRoute(chatIdToOpen, otherUserIdToOpen, userName)) {
                                 launchSingleTop = true
                             }
                         }
 
-                        !callId.isNullOrBlank() && !action.isNullOrBlank() -> {
-                            when (action) {
-                                "decline" -> {
-                                    NotificationHelper.cancelIncomingCall(applicationContext, callId)
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        runCatching { callsRepo.updateStatus(callId, "declined") }
-                                    }
-                                }
-                            }
-                        }
-
+                        // Deep link для звонка
                         !deepId.isNullOrBlank() -> {
+                            android.util.Log.d("MainActivity", "Deep link call: callId=$deepId, isVideo=$deepIsVideo")
                             navController.navigate(Routes.callRoute(deepId, deepIsVideo, deepUser)) {
                                 launchSingleTop = true
                             }
                         }
 
+                        // Обработка других deep links
                         else -> {
+                            android.util.Log.d("MainActivity", "Handling generic deep link")
                             navController.handleDeepLink(i)
                         }
                     }
                 }
 
-                LaunchedEffect(Unit) { intent?.let { handleIntent(it) } }
-                LaunchedEffect(Unit) { intentEvents.collect { incoming -> handleIntent(incoming) } }
+                // Обрабатываем начальный intent
+                LaunchedEffect(Unit) {
+                    intent?.let {
+                        android.util.Log.d("MainActivity", "Processing initial intent")
+                        handleIntent(it)
+                    }
+                }
 
+                // Обрабатываем новые intents
+                LaunchedEffect(Unit) {
+                    intentEvents.collect { incoming ->
+                        android.util.Log.d("MainActivity", "Processing new intent from flow")
+                        handleIntent(incoming)
+                    }
+                }
+
+                // Регистрируем FCM токен при авторизации
                 LaunchedEffect(Unit) {
                     if (FirebaseAuth.getInstance().currentUser != null) {
                         CoroutineScope(Dispatchers.IO).launch {
                             runCatching {
                                 FcmTokenManager.ensureCurrentTokenRegistered(applicationContext)
+                            }.onFailure { e ->
+                                android.util.Log.e("MainActivity", "FCM token registration failed", e)
                             }
                         }
                     }
@@ -323,17 +358,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // НОВОЕ: Функции для работы с разрешениями
+    /**
+     * Запрашивает все необходимые разрешения при старте приложения
+     */
     private fun requestNecessaryPermissions() {
+        if (permissionsRequested) {
+            android.util.Log.d("MainActivity", "Permissions already requested, skipping")
+            return
+        }
+
         val permissions = mutableListOf<String>()
 
-        // Базовые разрешения для звонков
+        // Микрофон для звонков
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             permissions.add(Manifest.permission.RECORD_AUDIO)
         }
 
+        // Камера для видео звонков
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -350,10 +393,17 @@ class MainActivity : ComponentActivity() {
         }
 
         if (permissions.isNotEmpty()) {
+            android.util.Log.d("MainActivity", "Requesting permissions: $permissions")
+            permissionsRequested = true
             permissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            android.util.Log.d("MainActivity", "All permissions already granted")
         }
     }
 
+    /**
+     * Проверяет наличие разрешений для звонка
+     */
     private fun checkCallPermissions(includeCamera: Boolean = false): Boolean {
         val audioGranted = ContextCompat.checkSelfPermission(
             this,
@@ -365,16 +415,43 @@ class MainActivity : ComponentActivity() {
                 this,
                 Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
-        } else true
+        } else {
+            true
+        }
 
-        return audioGranted && cameraGranted
+        val result = audioGranted && cameraGranted
+        android.util.Log.d("MainActivity", "checkCallPermissions(includeCamera=$includeCamera): audio=$audioGranted, camera=$cameraGranted, result=$result")
+        return result
     }
 
+    /**
+     * Запрашивает разрешения для звонка
+     */
     private fun requestCallPermissions(includeCamera: Boolean = false) {
-        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
-        if (includeCamera) {
+        val permissions = mutableListOf<String>()
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.RECORD_AUDIO)
+        }
+
+        if (includeCamera && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
             permissions.add(Manifest.permission.CAMERA)
         }
-        permissionLauncher.launch(permissions.toTypedArray())
+
+        if (permissions.isNotEmpty()) {
+            android.util.Log.d("MainActivity", "Requesting call permissions: $permissions")
+            permissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            android.util.Log.d("MainActivity", "Call permissions already granted")
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        android.util.Log.d("MainActivity", "onDestroy")
     }
 }
