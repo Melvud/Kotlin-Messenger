@@ -21,15 +21,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -43,6 +40,7 @@ import com.example.messenger_app.push.CallService
 import com.example.messenger_app.push.NotificationHelper
 import com.example.messenger_app.push.OngoingCallStore
 import com.example.messenger_app.webrtc.WebRtcCallManager
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FieldValue
@@ -52,15 +50,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
 
-/**
- * ═══════════════════════════════════════════════════════════════
- *         ПОЛНОСТЬЮ РАБОЧИЙ CALL SCREEN С КРАСИВЫМ ДИЗАЙНОМ
- * ═══════════════════════════════════════════════════════════════
- * ✅ Единый экран для аудио и видео
- * ✅ Видео отображается обоим участникам
- * ✅ Красивый современный дизайн
- * ✅ Правильная обработка всех состояний
- */
 @Composable
 fun CallScreen(
     callId: String,
@@ -74,7 +63,6 @@ fun CallScreen(
 
     val role = remember { if (playRingback) "caller" else "callee" }
 
-    // WebRTC States
     val isMuted by WebRtcCallManager.isMuted.collectAsState()
     val isSpeakerOn by WebRtcCallManager.isSpeakerOn.collectAsState()
     val isLocalVideoEnabled by WebRtcCallManager.isVideoEnabled.collectAsState()
@@ -83,26 +71,24 @@ fun CallScreen(
     val callQuality by WebRtcCallManager.callQuality.collectAsState()
     val videoUpgradeRequest by WebRtcCallManager.videoUpgradeRequest.collectAsState()
 
-    // Local States
+    // ✅ FIX: Получаем время начала из WebRtcCallManager
+    val callStartedAtMs by WebRtcCallManager.callStartedAtMs.collectAsState()
+
     var callEnded by remember { mutableStateOf(false) }
     var showEndCallDialog by remember { mutableStateOf(false) }
-    var videoSwapped by remember { mutableStateOf(false) }
-    var startedAtMillis by remember { mutableStateOf<Long?>(null) }
     var peerName by remember { mutableStateOf(otherUsername ?: "Собеседник") }
 
-    // Firestore
     val db = remember { FirebaseFirestore.getInstance() }
     val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
 
-    // SDP flags
-    val offerApplied = remember { mutableStateOf(false) }
-    val answerApplied = remember { mutableStateOf(false) }
+    var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
+    var lastProcessedAnswerTime by remember { mutableStateOf<Long?>(null) }
 
-    // Timer
+    // ✅ FIX: Таймер использует callStartedAtMs из WebRtcCallManager
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
-    LaunchedEffect(startedAtMillis) {
-        if (startedAtMillis != null) {
+    LaunchedEffect(callStartedAtMs) {
+        if (callStartedAtMs != null) {
             while (!callEnded) {
                 delay(1000)
                 nowMs = System.currentTimeMillis()
@@ -110,11 +96,9 @@ fun CallScreen(
         }
     }
 
-    val elapsedMillis = if (startedAtMillis != null && !callEnded) {
-        (nowMs - startedAtMillis!!).coerceAtLeast(0)
+    val elapsedMillis = if (callStartedAtMs != null && !callEnded) {
+        (nowMs - callStartedAtMs!!).coerceAtLeast(0)
     } else 0L
-
-    // ==================== INIT ONCE ====================
 
     DisposableEffect(Unit) {
         Log.d("CallScreen", """
@@ -123,6 +107,7 @@ fun CallScreen(
             callId: $callId
             isVideo: $isVideo
             role: $role
+            otherUsername: $otherUsername
             ════════════════════════════════════════
         """.trimIndent())
 
@@ -150,53 +135,98 @@ fun CallScreen(
         }
     }
 
-    // ==================== SIGNALING ====================
-
+    // ✅ FIX: Добавлен callback onCallStarted
     DisposableEffect(Unit) {
         WebRtcCallManager.signalingDelegate = object : WebRtcCallManager.SignalingDelegate {
+
             override fun onLocalDescription(callId: String, sdp: org.webrtc.SessionDescription) {
-                Log.d("CallScreen", "📤 SDP: ${sdp.type}")
+                Log.d("CallScreen", "📤 SDP: ${sdp.type} (length: ${sdp.description.length})")
+
                 scope.launch(Dispatchers.IO) {
-                    if (role == "caller") {
-                        repo.setOffer(callId, sdp.description, "offer")
-                    } else {
-                        repo.setAnswer(callId, sdp.description, "answer")
+                    try {
+                        if (role == "caller") {
+                            repo.setOffer(callId, sdp.description, "offer")
+                            Log.d("CallScreen", "✅ Offer sent to Firestore")
+                        } else {
+                            repo.setAnswer(callId, sdp.description, "answer")
+                            Log.d("CallScreen", "✅ Answer sent to Firestore")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "❌ Failed to send SDP: ${e.message}", e)
                     }
                 }
             }
 
             override fun onIceCandidate(callId: String, candidate: org.webrtc.IceCandidate) {
                 Log.d("CallScreen", "📤 ICE: ${candidate.sdpMid}:${candidate.sdpMLineIndex}")
+
                 val who = if (role == "caller") "caller" else "callee"
+
                 val map = hashMapOf(
                     "sdpMid" to (candidate.sdpMid ?: "0"),
                     "sdpMLineIndex" to candidate.sdpMLineIndex,
                     "candidate" to candidate.sdp,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
-                repo.candidatesCollection(callId, who).add(map)
+
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        repo.candidatesCollection(callId, who).add(map)
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "❌ Failed to send ICE: ${e.message}")
+                    }
+                }
             }
 
             override fun onCallTimeout(callId: String) {
+                Log.w("CallScreen", "⏰ Call timeout!")
                 scope.launch(Dispatchers.IO) {
-                    repo.updateStatus(callId, "timeout")
-                    db.collection("calls").document(callId)
-                        .update("endedAt", FieldValue.serverTimestamp())
+                    try {
+                        repo.updateStatus(callId, "timeout")
+                        db.collection("calls").document(callId)
+                            .update("endedAt", FieldValue.serverTimestamp())
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "Failed to update timeout status", e)
+                    }
                 }
             }
 
             override fun onConnectionFailed(callId: String) {
+                Log.e("CallScreen", "❌ Connection failed!")
                 scope.launch(Dispatchers.IO) {
-                    repo.updateStatus(callId, "failed")
-                    db.collection("calls").document(callId)
-                        .update("endedAt", FieldValue.serverTimestamp())
+                    try {
+                        repo.updateStatus(callId, "failed")
+                        db.collection("calls").document(callId)
+                            .update("endedAt", FieldValue.serverTimestamp())
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "Failed to update failed status", e)
+                    }
                 }
             }
 
             override fun onVideoUpgradeRequest() {
+                Log.d("CallScreen", "📹 Requesting video upgrade")
                 scope.launch(Dispatchers.IO) {
-                    db.collection("calls").document(callId)
-                        .update("videoUpgradeRequest", FieldValue.serverTimestamp())
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("videoUpgradeRequest", FieldValue.serverTimestamp())
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "Failed to request video upgrade", e)
+                    }
+                }
+            }
+
+            // ✅ НОВОЕ: Сохраняем время начала в Firestore
+            override fun onCallStarted(startTimeMs: Long) {
+                Log.d("CallScreen", "⏱️ Call started callback: $startTimeMs")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("startedAt", Timestamp(startTimeMs / 1000, 0))
+                        Log.d("CallScreen", "✅ startedAt saved to Firestore: $startTimeMs")
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "Failed to save startedAt", e)
+                    }
                 }
             }
         }
@@ -205,14 +235,16 @@ fun CallScreen(
             WebRtcCallManager.signalingDelegate = null
         }
     }
-    var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
-    // ==================== FIRESTORE ====================
 
     DisposableEffect(Unit) {
         val callDoc = db.collection("calls").document(callId)
 
         val docReg = callDoc.addSnapshotListener { snap, error ->
-            if (error != null) return@addSnapshotListener
+            if (error != null) {
+                Log.e("CallScreen", "Firestore listener error", error)
+                return@addSnapshotListener
+            }
+
             val data = snap?.data ?: return@addSnapshotListener
 
             if (peerName == "Собеседник") {
@@ -223,81 +255,73 @@ fun CallScreen(
 
                 if (name != peerName) {
                     peerName = name
+                    Log.d("CallScreen", "✅ Peer name updated: $peerName")
                 }
             }
-
-            val offerTimestamp = (data["offer"] as? Map<*, *>)?.get("timestamp") as? com.google.firebase.Timestamp
 
             if (role == "callee") {
                 val offerMap = data["offer"] as? Map<*, *>
                 val offer = offerMap?.get("sdp") as? String
-                val offerTimestamp = offerMap?.get("timestamp") as? com.google.firebase.Timestamp
+                val offerTimestamp = offerMap?.get("timestamp") as? Timestamp
 
                 if (!offer.isNullOrBlank() && offerTimestamp != null) {
                     val offerTime = offerTimestamp.toDate().time
 
-                    // Применяем offer только если это новый offer
                     if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
-                        Log.d("CallScreen", "📥 New/Updated offer received at $offerTime, applying...")
+                        Log.d("CallScreen", "📥 Applying OFFER (timestamp: $offerTime)")
                         lastProcessedOfferTime = offerTime
                         WebRtcCallManager.applyRemoteOffer(offer)
                     } else {
-                        Log.d("CallScreen", "⏭️ Skipping old offer (already processed)")
+                        Log.d("CallScreen", "⚠️ Skipping old offer (timestamp: $offerTime)")
                     }
-                } else if (!offer.isNullOrBlank() && !offerApplied.value) {
-                    // Fallback для старых звонков без timestamp
-                    Log.d("CallScreen", "📥 Applying initial OFFER (no timestamp)")
-                    offerApplied.value = true
-                    WebRtcCallManager.applyRemoteOffer(offer)
                 }
             }
 
             if (role == "caller") {
                 val answerMap = data["answer"] as? Map<*, *>
                 val answer = answerMap?.get("sdp") as? String
-                val answerTimestamp = answerMap?.get("timestamp") as? com.google.firebase.Timestamp
+                val answerTimestamp = answerMap?.get("timestamp") as? Timestamp
 
                 if (!answer.isNullOrBlank() && answerTimestamp != null) {
                     val answerTime = answerTimestamp.toDate().time
 
-                    // Применяем answer только если это новый answer
-                    if (lastProcessedOfferTime == null || answerTime > lastProcessedOfferTime!!) {
-                        Log.d("CallScreen", "📥 New/Updated answer received at $answerTime, applying...")
-                        lastProcessedOfferTime = answerTime
+                    if (lastProcessedAnswerTime == null || answerTime > lastProcessedAnswerTime!!) {
+                        Log.d("CallScreen", "📥 Applying ANSWER (timestamp: $answerTime)")
+                        lastProcessedAnswerTime = answerTime
                         WebRtcCallManager.applyRemoteAnswer(answer)
                         CallService.stopRingback(context)
                     } else {
-                        Log.d("CallScreen", "⏭️ Skipping old answer (already processed)")
+                        Log.d("CallScreen", "⚠️ Skipping old answer (timestamp: $answerTime)")
                     }
-                } else if (!answer.isNullOrBlank() && !answerApplied.value) {
-                    // Fallback для старых звонков без timestamp
-                    Log.d("CallScreen", "📥 Applying initial ANSWER (no timestamp)")
-                    answerApplied.value = true
-                    WebRtcCallManager.applyRemoteAnswer(answer)
-                    CallService.stopRingback(context)
                 }
             }
 
+            // ✅ FIX: Используем setCallStartTime вместо прямой установки
             val ts = data["startedAt"]
-            if (ts is com.google.firebase.Timestamp) {
-                if (startedAtMillis == null) {
-                    startedAtMillis = ts.toDate().time
-                    CallService.stopRingback(context)
-                }
+            if (ts is Timestamp) {
+                val firestoreTime = ts.toDate().time
+                WebRtcCallManager.setCallStartTime(firestoreTime)
+                CallService.stopRingback(context)
             }
 
             val videoUpgradeTs = data["videoUpgradeRequest"]
-            if (videoUpgradeTs != null && role == "callee") {
-                val fromUser = (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
+            if (videoUpgradeTs != null) {
+                val fromUser = when (role) {
+                    "callee" -> (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
+                    else -> (data["calleeUsername"] ?: data["toUsername"] ?: "Собеседник") as String
+                }
+                Log.d("CallScreen", "📹 Video upgrade request from: $fromUser")
                 WebRtcCallManager.onRemoteVideoUpgradeRequest(fromUser)
             }
 
             if (data["endedAt"] != null && !callEnded) {
+                Log.d("CallScreen", "📞 Call ended remotely")
                 callEnded = true
                 WebRtcCallManager.endCall()
                 CallService.stopRingback(context)
                 context.stopService(Intent(context, CallService::class.java))
                 OngoingCallStore.clear(context)
+
                 scope.launch {
                     delay(1500)
                     onNavigateBack()
@@ -306,9 +330,13 @@ fun CallScreen(
         }
 
         val iceColl = if (role == "caller") "calleeCandidates" else "callerCandidates"
+
         val iceReg = callDoc.collection(iceColl)
             .addSnapshotListener { snap, error ->
-                if (error != null) return@addSnapshotListener
+                if (error != null) {
+                    Log.e("CallScreen", "ICE listener error", error)
+                    return@addSnapshotListener
+                }
 
                 snap?.documentChanges?.forEach { dc ->
                     if (dc.type == DocumentChange.Type.ADDED) {
@@ -317,6 +345,7 @@ fun CallScreen(
                         val idx = (d["sdpMLineIndex"] as? Number)?.toInt() ?: 0
                         val cand = d["candidate"] as? String ?: return@forEach
 
+                        Log.d("CallScreen", "📥 Remote ICE: $mid:$idx")
                         WebRtcCallManager.addRemoteIceCandidate(mid, idx, cand)
                     }
                 }
@@ -325,36 +354,43 @@ fun CallScreen(
         onDispose {
             docReg.remove()
             iceReg.remove()
+            Log.d("CallScreen", "🔌 Firestore listeners removed")
         }
     }
-    // ==================== REMOTE VIDEO TRACKING ====================
 
-// Отслеживаем изменения remote video
     LaunchedEffect(isRemoteVideoEnabled) {
-        Log.d("CallScreen", "========================================")
+        Log.d("CallScreen", "════════════════════════════════════════")
         Log.d("CallScreen", "📹 Remote video enabled: $isRemoteVideoEnabled")
-        Log.d("CallScreen", "========================================")
+        Log.d("CallScreen", "════════════════════════════════════════")
 
         if (isRemoteVideoEnabled) {
-            // Даем время для привязки renderer
             delay(300)
             Log.d("CallScreen", "Remote video should be visible now")
         }
     }
-    // ==================== BROADCAST ====================
 
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 when (intent?.action) {
                     CallActionReceiver.ACTION_INTERNAL_HANGUP -> {
+                        Log.d("CallScreen", "🔴 Hangup from notification")
                         callEnded = true
                         WebRtcCallManager.endCall()
                         onNavigateBack()
                     }
-                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_MUTE -> WebRtcCallManager.toggleMic()
-                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_SPEAKER -> WebRtcCallManager.toggleSpeaker()
-                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_VIDEO -> WebRtcCallManager.toggleVideo()
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_MUTE -> {
+                        Log.d("CallScreen", "🎤 Toggle mute from notification")
+                        WebRtcCallManager.toggleMic()
+                    }
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_SPEAKER -> {
+                        Log.d("CallScreen", "🔊 Toggle speaker from notification")
+                        WebRtcCallManager.toggleSpeaker()
+                    }
+                    CallActionReceiver.ACTION_INTERNAL_TOGGLE_VIDEO -> {
+                        Log.d("CallScreen", "📹 Toggle video from notification")
+                        WebRtcCallManager.toggleVideo()
+                    }
                 }
             }
         }
@@ -369,31 +405,34 @@ fun CallScreen(
         ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         onDispose {
-            context.unregisterReceiver(receiver)
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (e: Exception) {
+                Log.w("CallScreen", "Failed to unregister receiver", e)
+            }
         }
     }
-
-    // ==================== CLEANUP ====================
 
     DisposableEffect(Unit) {
         onDispose {
             if (!callEnded) {
                 scope.launch(Dispatchers.IO) {
-                    db.collection("calls").document(callId)
-                        .update("endedAt", FieldValue.serverTimestamp())
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("endedAt", FieldValue.serverTimestamp())
+                    } catch (e: Exception) {
+                        Log.e("CallScreen", "Failed to end call on dispose", e)
+                    }
                 }
             }
         }
     }
 
-    // ==================== BACK ====================
-
     BackHandler {
         showEndCallDialog = true
     }
 
-    // ==================== UI ====================
-
+    // ✅ FIX: Правильная логика отображения видео
     ModernCallUI(
         peerName = peerName,
         elapsedMillis = elapsedMillis,
@@ -403,21 +442,35 @@ fun CallScreen(
         isRemoteVideoEnabled = isRemoteVideoEnabled,
         connectionState = connectionState,
         callQuality = callQuality,
-        videoSwapped = videoSwapped,
-        onToggleMic = { WebRtcCallManager.toggleMic() },
-        onToggleSpeaker = { WebRtcCallManager.toggleSpeaker() },
+        onToggleMic = {
+            Log.d("CallScreen", "🎤 Toggle mic")
+            WebRtcCallManager.toggleMic()
+        },
+        onToggleSpeaker = {
+            Log.d("CallScreen", "🔊 Toggle speaker")
+            WebRtcCallManager.toggleSpeaker()
+        },
         onToggleVideo = {
             Log.d("CallScreen", "📹 Toggle video")
             WebRtcCallManager.toggleVideo()
         },
-        onSwitchCamera = { WebRtcCallManager.switchCamera() },
-        onSwapVideo = { videoSwapped = !videoSwapped },
+        onSwitchCamera = {
+            Log.d("CallScreen", "🔄 Switch camera")
+            WebRtcCallManager.switchCamera()
+        },
         onHangup = {
+            Log.d("CallScreen", "🔴 Hangup button pressed")
             callEnded = true
+
             scope.launch(Dispatchers.IO) {
-                db.collection("calls").document(callId)
-                    .update("endedAt", FieldValue.serverTimestamp())
+                try {
+                    db.collection("calls").document(callId)
+                        .update("endedAt", FieldValue.serverTimestamp())
+                } catch (e: Exception) {
+                    Log.e("CallScreen", "Failed to update endedAt", e)
+                }
             }
+
             WebRtcCallManager.endCall()
             CallService.stop(context)
             OngoingCallStore.clear(context)
@@ -425,12 +478,17 @@ fun CallScreen(
         }
     )
 
-    // Dialogs
     videoUpgradeRequest?.let { request ->
         ModernVideoUpgradeDialog(
             fromUsername = request.fromUsername,
-            onAccept = { WebRtcCallManager.acceptVideoUpgrade() },
-            onDecline = { WebRtcCallManager.declineVideoUpgrade() }
+            onAccept = {
+                Log.d("CallScreen", "✅ Video upgrade accepted")
+                WebRtcCallManager.acceptVideoUpgrade()
+            },
+            onDecline = {
+                Log.d("CallScreen", "❌ Video upgrade declined")
+                WebRtcCallManager.declineVideoUpgrade()
+            }
         )
     }
 
@@ -443,10 +501,16 @@ fun CallScreen(
                     onClick = {
                         showEndCallDialog = false
                         callEnded = true
+
                         scope.launch(Dispatchers.IO) {
-                            db.collection("calls").document(callId)
-                                .update("endedAt", FieldValue.serverTimestamp())
+                            try {
+                                db.collection("calls").document(callId)
+                                    .update("endedAt", FieldValue.serverTimestamp())
+                            } catch (e: Exception) {
+                                Log.e("CallScreen", "Failed to update endedAt", e)
+                            }
                         }
+
                         WebRtcCallManager.endCall()
                         CallService.stop(context)
                         OngoingCallStore.clear(context)
@@ -465,10 +529,7 @@ fun CallScreen(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//                     СОВРЕМЕННЫЙ ДИЗАЙН UI
-// ═══════════════════════════════════════════════════════════════
-
+// ✅ FIX: Правильная логика отображения видео
 @Composable
 private fun ModernCallUI(
     peerName: String,
@@ -479,12 +540,10 @@ private fun ModernCallUI(
     isRemoteVideoEnabled: Boolean,
     connectionState: WebRtcCallManager.ConnectionState,
     callQuality: WebRtcCallManager.Quality,
-    videoSwapped: Boolean,
     onToggleMic: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onToggleVideo: () -> Unit,
     onSwitchCamera: () -> Unit,
-    onSwapVideo: () -> Unit,
     onHangup: () -> Unit
 ) {
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
@@ -502,44 +561,34 @@ private fun ModernCallUI(
                 )
             )
     ) {
-        // ═══ ГЛАВНЫЙ КОНТЕНТ ═══
+        // ═══ КОНТЕНТ ЗВОНКА ═══
         Box(modifier = Modifier.fillMaxSize()) {
             when {
-                // ✅ ПРИОРИТЕТ 1: Если есть удаленное видео - показываем его на весь экран
-                isRemoteVideoEnabled && !videoSwapped -> {
+                // ✅ ПРИОРИТЕТ 1: Если есть УДАЛЕННОЕ видео - показываем ЕГО на весь экран
+                isRemoteVideoEnabled -> {
+                    Log.d("ModernCallUI", "✅ Showing REMOTE video fullscreen")
                     RemoteVideoFullScreen()
+
+                    // Показываем локальное в PiP только если оно включено
                     if (isLocalVideoEnabled) {
                         LocalVideoPip(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(16.dp)
-                                .zIndex(10f),
-                            onSwap = onSwapVideo
+                                .zIndex(10f)
                         )
                     }
                 }
 
-                // ✅ ПРИОРИТЕТ 2: Если своппнуто - показываем локальное на весь экран
-                isLocalVideoEnabled && videoSwapped -> {
-                    LocalVideoFullScreen()
-                    if (isRemoteVideoEnabled) {
-                        RemoteVideoPip(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(16.dp)
-                                .zIndex(10f),
-                            onSwap = onSwapVideo
-                        )
-                    }
-                }
-
-                // ✅ ПРИОРИТЕТ 3: Если есть только локальное видео
-                isLocalVideoEnabled && !isRemoteVideoEnabled -> {
+                // ✅ ПРИОРИТЕТ 2: Если есть только ЛОКАЛЬНОЕ видео
+                isLocalVideoEnabled -> {
+                    Log.d("ModernCallUI", "✅ Showing LOCAL video fullscreen")
                     LocalVideoFullScreen()
                 }
 
-                // ✅ ПРИОРИТЕТ 4: Если видео нет совсем - показываем аудио экран
+                // ✅ ПРИОРИТЕТ 3: Аудио режим (нет видео совсем)
                 else -> {
+                    Log.d("ModernCallUI", "✅ Showing AUDIO mode")
                     ModernAudioContent(
                         peerName = peerName,
                         isConnected = isConnected
@@ -548,7 +597,7 @@ private fun ModernCallUI(
             }
         }
 
-        // ═══ ВЕРХНИЙ ОВЕРЛЕЙ С ИНФОРМАЦИЕЙ ═══
+        // ═══ ВЕРХНЯЯ ПАНЕЛЬ С ИНФОРМАЦИЕЙ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -565,7 +614,6 @@ private fun ModernCallUI(
                 .padding(top = 50.dp, bottom = 40.dp, start = 20.dp, end = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Имя собеседника
             Text(
                 text = peerName,
                 style = MaterialTheme.typography.headlineMedium,
@@ -576,7 +624,6 @@ private fun ModernCallUI(
 
             Spacer(Modifier.height(8.dp))
 
-            // Статус звонка
             val statusText = when (connectionState) {
                 WebRtcCallManager.ConnectionState.CONNECTING -> "Соединение..."
                 WebRtcCallManager.ConnectionState.CONNECTED -> formatTime(elapsedMillis)
@@ -606,7 +653,6 @@ private fun ModernCallUI(
                 )
             }
 
-            // Индикаторы
             if (connectionState != WebRtcCallManager.ConnectionState.CONNECTED ||
                 callQuality != WebRtcCallManager.Quality.Good) {
                 Spacer(Modifier.height(12.dp))
@@ -622,7 +668,7 @@ private fun ModernCallUI(
             }
         }
 
-        // ═══ НИЖНИЙ ОВЕРЛЕЙ С КНОПКАМИ УПРАВЛЕНИЯ ═══
+        // ═══ НИЖНЯЯ ПАНЕЛЬ С КНОПКАМИ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -639,13 +685,11 @@ private fun ModernCallUI(
                 .padding(bottom = 50.dp, top = 40.dp, start = 20.dp, end = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Основные кнопки управления
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Микрофон
                 ModernControlButton(
                     icon = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
                     isActive = !isMuted,
@@ -653,15 +697,13 @@ private fun ModernCallUI(
                     onClick = onToggleMic
                 )
 
-                // Видео
                 ModernControlButton(
                     icon = if (isLocalVideoEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
                     isActive = isLocalVideoEnabled,
-                    label = if (isLocalVideoEnabled) "Видео" else "Видео",
+                    label = "Видео",
                     onClick = onToggleVideo
                 )
 
-                // Динамик
                 ModernControlButton(
                     icon = if (isSpeakerOn) Icons.Default.VolumeUp else Icons.Default.VolumeDown,
                     isActive = isSpeakerOn,
@@ -669,7 +711,6 @@ private fun ModernCallUI(
                     onClick = onToggleSpeaker
                 )
 
-                // Камера (только если видео включено)
                 if (isLocalVideoEnabled) {
                     ModernControlButton(
                         icon = Icons.Default.Cameraswitch,
@@ -682,7 +723,6 @@ private fun ModernCallUI(
 
             Spacer(Modifier.height(32.dp))
 
-            // Кнопка завершить звонок
             Surface(
                 onClick = onHangup,
                 modifier = Modifier.size(70.dp),
@@ -712,9 +752,6 @@ private fun ModernCallUI(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//                         VIDEO VIEWS
-// ═══════════════════════════════════════════════════════════════
 @Composable
 private fun LocalVideoFullScreen() {
     var rendererReady by remember { mutableStateOf(false) }
@@ -735,116 +772,60 @@ private fun LocalVideoFullScreen() {
     )
 }
 
+// ✅ FIX: Локальное видео БЕЗ зеркала в PiP
 @Composable
-private fun LocalVideoPip(
-    modifier: Modifier,
-    onSwap: () -> Unit
-) {
+private fun LocalVideoPip(modifier: Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
     Surface(
-        modifier = modifier
-            .size(120.dp, 160.dp)
-            .clickable(onClick = onSwap),
+        modifier = modifier.size(120.dp, 160.dp),
         shape = RoundedCornerShape(20.dp),
         color = Color.Black,
         shadowElevation = 16.dp
     ) {
-        Box {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    SurfaceViewRenderer(ctx).apply {
-                        WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
-                        rendererReady = true
-                    }
-                },
-                update = { view ->
-                    if (rendererReady) {
-                        WebRtcCallManager.bindLocalRenderer(view)
-                    }
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                SurfaceViewRenderer(ctx).apply {
+                    // ✅ FIX: mirror=true для локального видео
+                    WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
+                    rendererReady = true
                 }
-            )
-
-            Icon(
-                Icons.Default.SwapVert,
-                contentDescription = "Поменять",
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .size(20.dp),
-                tint = Color.White
-            )
-        }
+            },
+            update = { view ->
+                if (rendererReady) {
+                    WebRtcCallManager.bindLocalRenderer(view)
+                }
+            }
+        )
     }
 }
 
+// ✅ FIX: Удаленное видео БЕЗ зеркала
 @Composable
 private fun RemoteVideoFullScreen() {
     var rendererReady by remember { mutableStateOf(false) }
 
+    Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen")
+
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
+            Log.d("RemoteVideoFullScreen", "📹 Creating renderer")
             SurfaceViewRenderer(ctx).apply {
+                // ✅ FIX: mirror=false для удаленного видео!
                 WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
                 rendererReady = true
             }
         },
         update = { view ->
             if (rendererReady) {
+                Log.d("RemoteVideoFullScreen", "📹 Binding remote renderer")
                 WebRtcCallManager.bindRemoteRenderer(view)
             }
         }
     )
 }
-
-@Composable
-private fun RemoteVideoPip(
-    modifier: Modifier,
-    onSwap: () -> Unit
-) {
-    var rendererReady by remember { mutableStateOf(false) }
-
-    Surface(
-        modifier = modifier
-            .size(120.dp, 160.dp)
-            .clickable(onClick = onSwap),
-        shape = RoundedCornerShape(20.dp),
-        color = Color.Black,
-        shadowElevation = 16.dp
-    ) {
-        Box {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    SurfaceViewRenderer(ctx).apply {
-                        WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = true)
-                        rendererReady = true
-                    }
-                },
-                update = { view ->
-                    if (rendererReady) {
-                        WebRtcCallManager.bindRemoteRenderer(view)
-                    }
-                }
-            )
-
-            Icon(
-                Icons.Default.SwapVert,
-                contentDescription = "Поменять",
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .size(20.dp),
-                tint = Color.White
-            )
-        }
-    }
-}
-// ═══════════════════════════════════════════════════════════════
-//                    AUDIO CONTENT (БЕЗ ВИДЕО)
-// ═══════════════════════════════════════════════════════════════
 
 @Composable
 private fun ModernAudioContent(
@@ -855,7 +836,6 @@ private fun ModernAudioContent(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        // Анимированные круги
         if (!isConnected) {
             val infiniteTransition = rememberInfiniteTransition(label = "pulse")
 
@@ -892,7 +872,6 @@ private fun ModernAudioContent(
             }
         }
 
-        // Аватар
         Box(
             modifier = Modifier
                 .size(180.dp)
@@ -918,10 +897,6 @@ private fun ModernAudioContent(
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-//                         COMPONENTS
-// ═══════════════════════════════════════════════════════════════
 
 @Composable
 private fun ModernControlButton(
@@ -1121,93 +1096,4 @@ private fun formatTime(ms: Long): String {
     val m = (total % 3600) / 60
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
-}
-
-@Preview(showBackground = true, name = "Audio Call - Connecting")
-@Composable
-fun ModernCallUI_Preview_Audio_Connecting() {
-    MaterialTheme {
-        ModernCallUI(
-            peerName = "Собеседник",
-            elapsedMillis = 0,
-            isMuted = false,
-            isSpeakerOn = false,
-            isLocalVideoEnabled = false,
-            isRemoteVideoEnabled = false,
-            connectionState = WebRtcCallManager.ConnectionState.CONNECTING,
-            callQuality = WebRtcCallManager.Quality.Good,
-            videoSwapped = false,
-            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
-        )
-    }
-}
-
-@Preview(showBackground = true, name = "Audio Call - Connected")
-@Composable
-fun ModernCallUI_Preview_Audio_Connected() {
-    MaterialTheme {
-        ModernCallUI(
-            peerName = "Иван",
-            elapsedMillis = 123000, // 2 минуты 3 секунды
-            isMuted = false,
-            isSpeakerOn = true,
-            isLocalVideoEnabled = false,
-            isRemoteVideoEnabled = false,
-            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
-            callQuality = WebRtcCallManager.Quality.Good,
-            videoSwapped = false,
-            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
-        )
-    }
-}
-
-@Preview(showBackground = true, name = "Video Call - Connected")
-@Composable
-fun ModernCallUI_Preview_Video_Connected() {
-    MaterialTheme {
-        ModernCallUI(
-            peerName = "Екатерина",
-            elapsedMillis = 345000, // 5 минут 45 секунд
-            isMuted = false,
-            isSpeakerOn = true,
-            isLocalVideoEnabled = true,
-            isRemoteVideoEnabled = true,
-            connectionState = WebRtcCallManager.ConnectionState.CONNECTED,
-            callQuality = WebRtcCallManager.Quality.Good,
-            videoSwapped = false,
-            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
-        )
-    }
-}
-
-@Preview(showBackground = true, name = "Call - Reconnecting")
-@Composable
-fun ModernCallUI_Preview_Reconnecting() {
-    MaterialTheme {
-        ModernCallUI(
-            peerName = "Алексей",
-            elapsedMillis = 88000,
-            isMuted = false,
-            isSpeakerOn = true,
-            isLocalVideoEnabled = true,
-            isRemoteVideoEnabled = false, // Remote video might be lost
-            connectionState = WebRtcCallManager.ConnectionState.RECONNECTING,
-            callQuality = WebRtcCallManager.Quality.Poor,
-            videoSwapped = false,
-            onToggleMic = {}, onToggleSpeaker = {}, onToggleVideo = {}, onSwitchCamera = {}, onSwapVideo = {}, onHangup = {}
-        )
-    }
-}
-
-@Preview(showBackground = true, name = "Video Upgrade Dialog")
-@Composable
-fun ModernVideoUpgradeDialog_Preview() {
-    MaterialTheme {
-        Box(modifier = Modifier.fillMaxSize()) {
-            ModernVideoUpgradeDialog(
-                fromUsername = "Мария",
-                onAccept = {}, onDecline = {}
-            )
-        }
-    }
 }
