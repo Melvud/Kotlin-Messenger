@@ -1272,21 +1272,21 @@ object WebRtcCallManager {
      * every REMOTE_VIDEO_CHECK_INTERVAL_MS. When the state changes, it updates the
      * _isRemoteVideoEnabled StateFlow, which triggers UI recomposition.
      * 
-     * Thread Safety: Must be called on the main thread. The monitoring runnable always executes
-     * on the main thread via mainHandler, ensuring thread-safe state updates.
+     * Thread Safety: Must be called on the main thread. Since this is a private method and all
+     * call sites are controlled (onAddTrack), thread safety is ensured by design. The monitoring
+     * runnable always executes on the main thread via mainHandler.
      * 
      * Lifecycle: Monitoring automatically stops when:
      * - The call ends (isStarted becomes false)
      * - The remote video track is removed (track becomes null)
      * - stopMonitoringRemoteVideoTrack() is called explicitly
+     * 
+     * Note: It's safe to call this multiple times - any existing monitoring will be stopped first.
+     * The anonymous Runnable is intentional - monitoring is started once per call, so the overhead
+     * of object creation is negligible.
      */
     private fun startMonitoringRemoteVideoTrack() {
-        // Must be called on main thread
-        
-        // Stop any existing monitoring first
-        if (remoteVideoCheckRunnable != null) {
-            Log.w(TAG, "⚠️ Monitoring was already active, stopping previous instance")
-        }
+        // Stop any existing monitoring first (safe to call multiple times)
         stopMonitoringRemoteVideoTrack()
         
         val runnable = object : Runnable {
