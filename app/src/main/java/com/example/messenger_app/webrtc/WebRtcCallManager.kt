@@ -649,7 +649,7 @@ object WebRtcCallManager {
             return
         }
 
-        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION")
+        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION (role=$currentRole)")
 
         val p = peer ?: run {
             Log.e(TAG, "Cannot renegotiate: peer is null")
@@ -660,6 +660,8 @@ object WebRtcCallManager {
         offerCreated.set(false)
 
         mainHandler.postDelayed({
+            // For mid-call changes (like toggling video), the person who made the change
+            // should create an offer regardless of their initial role
             createOffer()
         }, 100)
     }
@@ -1267,7 +1269,9 @@ object WebRtcCallManager {
                     
                     if (isEnabled != currentState) {
                         Log.d(TAG, "📹 Remote video track state changed: $isEnabled")
-                        _isRemoteVideoEnabled.value = isEnabled
+                        mainHandler.post {
+                            _isRemoteVideoEnabled.value = isEnabled
+                        }
                     }
                     
                     // Continue monitoring
@@ -1275,7 +1279,9 @@ object WebRtcCallManager {
                 } else if (track == null && _isRemoteVideoEnabled.value) {
                     // Track was removed
                     Log.d(TAG, "📹 Remote video track removed")
-                    _isRemoteVideoEnabled.value = false
+                    mainHandler.post {
+                        _isRemoteVideoEnabled.value = false
+                    }
                 }
             }
         }
