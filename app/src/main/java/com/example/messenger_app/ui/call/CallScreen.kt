@@ -144,12 +144,23 @@ fun CallScreen(
 
                 scope.launch(Dispatchers.IO) {
                     try {
-                        if (role == "caller") {
-                            repo.setOffer(callId, sdp.description, "offer")
-                            Log.d("CallScreen", "✅ Offer sent to Firestore")
-                        } else {
-                            repo.setAnswer(callId, sdp.description, "answer")
-                            Log.d("CallScreen", "✅ Answer sent to Firestore")
+                        // ✅ FIX: Check SDP type instead of role to handle renegotiation correctly
+                        when (sdp.type) {
+                            org.webrtc.SessionDescription.Type.OFFER -> {
+                                repo.setOffer(callId, sdp.description, "offer")
+                                Log.d("CallScreen", "✅ Offer sent to Firestore (role=$role)")
+                            }
+                            org.webrtc.SessionDescription.Type.ANSWER -> {
+                                repo.setAnswer(callId, sdp.description, "answer")
+                                Log.d("CallScreen", "✅ Answer sent to Firestore (role=$role)")
+                            }
+                            org.webrtc.SessionDescription.Type.PRANSWER -> {
+                                // Provisional answer - not used in our signaling, ignore
+                                Log.d("CallScreen", "⚠️ Provisional answer received, ignoring")
+                            }
+                            else -> {
+                                Log.w("CallScreen", "⚠️ Unknown SDP type: ${sdp.type}")
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e("CallScreen", "❌ Failed to send SDP: ${e.message}", e)
