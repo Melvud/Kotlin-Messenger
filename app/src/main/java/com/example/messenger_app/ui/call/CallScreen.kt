@@ -71,7 +71,6 @@ fun CallScreen(
     val callQuality by WebRtcCallManager.callQuality.collectAsState()
     val videoUpgradeRequest by WebRtcCallManager.videoUpgradeRequest.collectAsState()
 
-    // ✅ FIX: Получаем время начала из WebRtcCallManager
     val callStartedAtMs by WebRtcCallManager.callStartedAtMs.collectAsState()
 
     var callEnded by remember { mutableStateOf(false) }
@@ -79,12 +78,14 @@ fun CallScreen(
     var peerName by remember { mutableStateOf(otherUsername ?: "Собеседник") }
 
     val db = remember { FirebaseFirestore.getInstance() }
+    // ✅ ПРИМЕЧАНИЕ: Конструктор CallsRepository использует параметры по умолчанию,
+    // поэтому этот код будет работать с исправленной версией CallsRepository
     val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
 
     var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
     var lastProcessedAnswerTime by remember { mutableStateOf<Long?>(null) }
+    var lastProcessedUpgradeRequestTime by remember { mutableStateOf<Long?>(null) }
 
-    // ✅ FIX: Таймер использует callStartedAtMs из WebRtcCallManager
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(callStartedAtMs) {
@@ -100,7 +101,6 @@ fun CallScreen(
         (nowMs - callStartedAtMs!!).coerceAtLeast(0)
     } else 0L
 
-    // ✅ FIX: Set signaling delegate BEFORE starting the call to ensure offer/answer can be sent
     DisposableEffect(Unit) {
         Log.d("CallScreen", """
             ════════════════════════════════════════
@@ -115,7 +115,6 @@ fun CallScreen(
         NotificationHelper.cancelIncomingCall(context, callId)
         WebRtcCallManager.init(context)
 
-        // Set signaling delegate BEFORE startCall() so offer/answer can be sent immediately
         WebRtcCallManager.signalingDelegate = object : WebRtcCallManager.SignalingDelegate {
 
             override fun onLocalDescription(callId: String, sdp: org.webrtc.SessionDescription) {
@@ -123,18 +122,16 @@ fun CallScreen(
 
                 scope.launch(Dispatchers.IO) {
                     try {
-                        // ✅ FIX: Check SDP type instead of role to handle renegotiation correctly
                         when (sdp.type) {
                             org.webrtc.SessionDescription.Type.OFFER -> {
-                                repo.setOffer(callId, sdp.description, "offer")
+                                repo.setOffer(callId, sdp.description, role, "offer")
                                 Log.d("CallScreen", "✅ Offer sent to Firestore (role=$role)")
                             }
                             org.webrtc.SessionDescription.Type.ANSWER -> {
-                                repo.setAnswer(callId, sdp.description, "answer")
+                                repo.setAnswer(callId, sdp.description, role, "answer")
                                 Log.d("CallScreen", "✅ Answer sent to Firestore (role=$role)")
                             }
                             org.webrtc.SessionDescription.Type.PRANSWER -> {
-                                // Provisional answer - not used in our signaling, ignore
                                 Log.d("CallScreen", "⚠️ Provisional answer received, ignoring")
                             }
                             else -> {
@@ -173,8 +170,6 @@ fun CallScreen(
                 scope.launch(Dispatchers.IO) {
                     try {
                         repo.updateStatus(callId, "timeout")
-                        db.collection("calls").document(callId)
-                            .update("endedAt", FieldValue.serverTimestamp())
                     } catch (e: Exception) {
                         Log.e("CallScreen", "Failed to update timeout status", e)
                     }
@@ -186,8 +181,6 @@ fun CallScreen(
                 scope.launch(Dispatchers.IO) {
                     try {
                         repo.updateStatus(callId, "failed")
-                        db.collection("calls").document(callId)
-                            .update("endedAt", FieldValue.serverTimestamp())
                     } catch (e: Exception) {
                         Log.e("CallScreen", "Failed to update failed status", e)
                     }
@@ -206,7 +199,6 @@ fun CallScreen(
                 }
             }
 
-            // ✅ НОВОЕ: Сохраняем время начала в Firestore
             override fun onCallStarted(startTimeMs: Long) {
                 Log.d("CallScreen", "⏱️ Call started callback: $startTimeMs")
                 scope.launch(Dispatchers.IO) {
@@ -221,7 +213,6 @@ fun CallScreen(
             }
         }
 
-        // Now start the call - the delegate is already set and ready to handle callbacks
         WebRtcCallManager.startCall(
             callId = callId,
             isVideo = isVideo,
@@ -267,38 +258,38 @@ fun CallScreen(
                 }
             }
 
-            // ✅ FIX: Callee handles offers, Caller handles answers.
             val offerMap = data["offer"] as? Map<*, *>
             val offer = offerMap?.get("sdp") as? String
             val offerTimestamp = offerMap?.get("timestamp") as? Timestamp
+            val offerSender = offerMap?.get("senderRole") as? String
 
-            if (role == "callee" && !offer.isNullOrBlank() && offerTimestamp != null) {
+            if (offerSender != role && !offer.isNullOrBlank() && offerTimestamp != null) {
                 val offerTime = offerTimestamp.toDate().time
                 if (lastProcessedOfferTime == null || offerTime > lastProcessedOfferTime!!) {
-                    Log.d("CallScreen", "📥 Applying OFFER (timestamp: $offerTime, role: $role)")
+                    Log.d("CallScreen", "📥 Applying REMOTE OFFER (timestamp: $offerTime, from: $offerSender)")
                     lastProcessedOfferTime = offerTime
                     WebRtcCallManager.applyRemoteOffer(offer)
                 } else {
-                    Log.d("CallScreen", "⚠️ Skipping old offer (timestamp: $offerTime)")
+                    Log.d("CallScreen", "⚠️ Skipping old remote offer (timestamp: $offerTime)")
                 }
             }
 
             val answerMap = data["answer"] as? Map<*, *>
             val answer = answerMap?.get("sdp") as? String
             val answerTimestamp = answerMap?.get("timestamp") as? Timestamp
+            val answerSender = answerMap?.get("senderRole") as? String
 
-            if (role == "caller" && !answer.isNullOrBlank() && answerTimestamp != null) {
+            if (answerSender != role && !answer.isNullOrBlank() && answerTimestamp != null) {
                 val answerTime = answerTimestamp.toDate().time
                 if (lastProcessedAnswerTime == null || answerTime > lastProcessedAnswerTime!!) {
-                    Log.d("CallScreen", "📥 Applying ANSWER (timestamp: $answerTime, role: $role)")
+                    Log.d("CallScreen", "📥 Applying REMOTE ANSWER (timestamp: $answerTime, from: $answerSender)")
                     lastProcessedAnswerTime = answerTime
                     WebRtcCallManager.applyRemoteAnswer(answer)
                 } else {
-                    Log.d("CallScreen", "⚠️ Skipping old answer (timestamp: $answerTime)")
+                    Log.d("CallScreen", "⚠️ Skipping old remote answer (timestamp: $answerTime)")
                 }
             }
 
-            // ✅ FIX: Используем setCallStartTime вместо прямой установки
             val ts = data["startedAt"]
             if (ts is Timestamp) {
                 val firestoreTime = ts.toDate().time
@@ -307,13 +298,20 @@ fun CallScreen(
             }
 
             val videoUpgradeTs = data["videoUpgradeRequest"]
-            if (videoUpgradeTs != null) {
-                val fromUser = when (role) {
-                    "callee" -> (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
-                    else -> (data["calleeUsername"] ?: data["toUsername"] ?: "Собеседник") as String
+            if (videoUpgradeTs is Timestamp) {
+                val upgradeTime = videoUpgradeTs.toDate().time
+                if (lastProcessedUpgradeRequestTime == null || upgradeTime > lastProcessedUpgradeRequestTime!!) {
+                    Log.d("CallScreen", "📹 Video upgrade request received (timestamp: $upgradeTime)")
+                    lastProcessedUpgradeRequestTime = upgradeTime
+
+                    val fromUser = when (role) {
+                        "callee" -> (data["callerUsername"] ?: data["fromUsername"] ?: "Собеседник") as String
+                        else -> (data["calleeUsername"] ?: data["toUsername"] ?: "Собеседник") as String
+                    }
+                    WebRtcCallManager.onRemoteVideoUpgradeRequest(fromUser)
+                } else {
+                    Log.d("CallScreen", "⚠️ Skipping old video upgrade request (timestamp: $upgradeTime)")
                 }
-                Log.d("CallScreen", "📹 Video upgrade request from: $fromUser")
-                WebRtcCallManager.onRemoteVideoUpgradeRequest(fromUser)
             }
 
             if (data["endedAt"] != null && !callEnded) {
@@ -420,8 +418,8 @@ fun CallScreen(
             if (!callEnded) {
                 scope.launch(Dispatchers.IO) {
                     try {
-                        db.collection("calls").document(callId)
-                            .update("endedAt", FieldValue.serverTimestamp())
+                        // Используем repo.updateStatus для корректного завершения
+                        repo.updateStatus(callId, "ended")
                     } catch (e: Exception) {
                         Log.e("CallScreen", "Failed to end call on dispose", e)
                     }
@@ -434,9 +432,23 @@ fun CallScreen(
         showEndCallDialog = true
     }
 
-    var isLocalVideoFullScreen by remember { mutableStateOf(false) }
+    // ---
+    // ✅ ИЗМЕНЕНИЕ 1: Логика isLocalVideoFullScreen (переименована)
+    // ---
+    var preferLocalMainView by remember { mutableStateOf(true) }
 
-    // ✅ FIX: Правильная логика отображения видео
+    // Этот LaunchedEffect реализует "автоматическое переключение"
+    // Когда появляется удаленное видео, оно становится главным
+    // Когда оно исчезает, главным становится локальное видео
+    LaunchedEffect(isRemoteVideoEnabled) {
+        if (isRemoteVideoEnabled) {
+            preferLocalMainView = false
+        } else {
+            preferLocalMainView = true
+        }
+    }
+    // --- Конец Изменения 1 ---
+
     ModernCallUI(
         peerName = peerName,
         elapsedMillis = elapsedMillis,
@@ -464,12 +476,13 @@ fun CallScreen(
         },
         onHangup = {
             Log.d("CallScreen", "🔴 Hangup button pressed")
+            if (callEnded) return@ModernCallUI
             callEnded = true
 
             scope.launch(Dispatchers.IO) {
                 try {
-                    db.collection("calls").document(callId)
-                        .update("endedAt", FieldValue.serverTimestamp())
+                    // Используем repo.updateStatus для корректного завершения
+                    repo.updateStatus(callId, "ended")
                 } catch (e: Exception) {
                     Log.e("CallScreen", "Failed to update endedAt", e)
                 }
@@ -480,8 +493,17 @@ fun CallScreen(
             OngoingCallStore.clear(context)
             onNavigateBack()
         },
-        isLocalVideoFullScreen = isLocalVideoFullScreen,
-        onToggleLocalVideoFullScreen = { isLocalVideoFullScreen = !isLocalVideoFullScreen }
+        // ---
+        // ✅ ИЗМЕНЕНИЕ 3: Исправлена логика onToggle
+        // ---
+        isLocalMainView = preferLocalMainView,
+        onToggleMainView = {
+            // Разрешаем переключение, только если ОБА видеопотока активны
+            if (isLocalVideoEnabled && isRemoteVideoEnabled) {
+                preferLocalMainView = !preferLocalMainView
+            }
+        }
+        // --- Конец Изменения 3 ---
     )
 
     videoUpgradeRequest?.let { request ->
@@ -489,10 +511,22 @@ fun CallScreen(
             fromUsername = request.fromUsername,
             onAccept = {
                 Log.d("CallScreen", "✅ Video upgrade accepted")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("videoUpgradeRequest", null)
+                    } catch (e: Exception) { Log.e("CallScreen", "Failed to clear videoUpgradeRequest", e) }
+                }
                 WebRtcCallManager.acceptVideoUpgrade()
             },
             onDecline = {
                 Log.d("CallScreen", "❌ Video upgrade declined")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        db.collection("calls").document(callId)
+                            .update("videoUpgradeRequest", null)
+                    } catch (e: Exception) { Log.e("CallScreen", "Failed to clear videoUpgradeRequest", e) }
+                }
                 WebRtcCallManager.declineVideoUpgrade()
             }
         )
@@ -506,12 +540,13 @@ fun CallScreen(
                 TextButton(
                     onClick = {
                         showEndCallDialog = false
+                        if (callEnded) return@TextButton
                         callEnded = true
 
                         scope.launch(Dispatchers.IO) {
                             try {
-                                db.collection("calls").document(callId)
-                                    .update("endedAt", FieldValue.serverTimestamp())
+                                // Используем repo.updateStatus для корректного завершения
+                                repo.updateStatus(callId, "ended")
                             } catch (e: Exception) {
                                 Log.e("CallScreen", "Failed to update endedAt", e)
                             }
@@ -535,7 +570,6 @@ fun CallScreen(
     }
 }
 
-// ✅ FIX: Правильная логика отображения видео
 @Composable
 private fun ModernCallUI(
     peerName: String,
@@ -551,8 +585,8 @@ private fun ModernCallUI(
     onToggleVideo: () -> Unit,
     onSwitchCamera: () -> Unit,
     onHangup: () -> Unit,
-    isLocalVideoFullScreen: Boolean,
-    onToggleLocalVideoFullScreen: () -> Unit
+    isLocalMainView: Boolean, // ✅ ИЗМЕНЕНИЕ 2: Параметр переименован
+    onToggleMainView: () -> Unit // ✅ ИЗМЕНЕНИЕ 2: Параметр переименован
 ) {
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
 
@@ -569,48 +603,58 @@ private fun ModernCallUI(
                 )
             )
     ) {
-        // ═══ КОНТЕНТ ЗВОНКА ═══
         Box(modifier = Modifier.fillMaxSize()) {
-            val showLocalVideo = isLocalVideoEnabled
-            val showRemoteVideo = isRemoteVideoEnabled
 
-            if (showLocalVideo && isLocalVideoFullScreen) {
-                // Локальное видео на полный экран
-                LocalVideoFullScreen(Modifier.clickable(onClick = onToggleLocalVideoFullScreen))
-                if (showRemoteVideo) {
-                    // Удаленное в PiP
+            // ---
+            // 🐞 ИСПРАВЛЕНИЕ: Логика отображения видео полностью переписана для ясности.
+            // ---
+
+            // Модификатор для переключения. Активен, только если ОБА видео есть.
+            val toggleModifier = if (isLocalVideoEnabled && isRemoteVideoEnabled) {
+                Modifier.clickable(onClick = onToggleMainView)
+            } else {
+                Modifier
+            }
+
+            if (!isLocalVideoEnabled && !isRemoteVideoEnabled) {
+                // 1. Аудио-звонок: Оба видео выключены
+                ModernAudioContent(
+                    peerName = peerName,
+                    isConnected = isConnected
+                )
+            } else if (isLocalVideoEnabled && !isRemoteVideoEnabled) {
+                // 2. Только локальное видео: Показываем его на весь экран
+                LocalVideoFullScreen(modifier = Modifier.fillMaxSize())
+            } else if (!isLocalVideoEnabled && isRemoteVideoEnabled) {
+                // 3. Только удаленное видео: Показываем его на весь экран
+                RemoteVideoFullScreen(modifier = Modifier.fillMaxSize())
+            } else {
+                // 4. Оба видео включены: Показываем одно в PiP, другое - на весь экран
+                if (isLocalMainView) {
+                    // Локальное - главное, Удаленное - PiP
+                    LocalVideoFullScreen(toggleModifier)
                     RemoteVideoPip(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(16.dp)
                             .zIndex(10f)
-                            .clickable(onClick = onToggleLocalVideoFullScreen)
+                            .clickable(onClick = onToggleMainView) // PiP тоже кликабельный
                     )
-                }
-            } else {
-                // Удаленное видео на полный экран (или аудио UI)
-                if (showRemoteVideo) {
-                    RemoteVideoFullScreen(Modifier.clickable(onClick = onToggleLocalVideoFullScreen))
                 } else {
-                    ModernAudioContent(
-                        peerName = peerName,
-                        isConnected = isConnected
-                    )
-                }
-                if (showLocalVideo) {
-                    // Локальное в PiP
+                    // Удаленное - главное, Локальное - PiP
+                    RemoteVideoFullScreen(toggleModifier)
                     LocalVideoPip(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(16.dp)
                             .zIndex(10f)
-                            .clickable(onClick = onToggleLocalVideoFullScreen)
+                            .clickable(onClick = onToggleMainView) // PiP тоже кликабельный
                     )
                 }
             }
+            // --- Конец Исправления ---
         }
 
-        // ═══ ВЕРХНЯЯ ПАНЕЛЬ С ИНФОРМАЦИЕЙ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -681,7 +725,6 @@ private fun ModernCallUI(
             }
         }
 
-        // ═══ НИЖНЯЯ ПАНЕЛЬ С КНОПКАМИ ═══
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -769,12 +812,9 @@ private fun ModernCallUI(
 private fun LocalVideoFullScreen(modifier: Modifier = Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
-    Log.d("LocalVideoFullScreen", "📹 Rendering local video fullscreen (recomposition)")
-
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
-            Log.d("LocalVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
                 WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = false)
                 rendererReady = true
@@ -782,19 +822,15 @@ private fun LocalVideoFullScreen(modifier: Modifier = Modifier) {
         },
         update = { view ->
             if (rendererReady) {
-                Log.d("LocalVideoFullScreen", "📹 Binding local renderer (update)")
                 WebRtcCallManager.bindLocalRenderer(view)
             }
         }
     )
 }
 
-// ✅ FIX: Локальное видео БЕЗ зеркала в PiP
 @Composable
 private fun LocalVideoPip(modifier: Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
-
-    Log.d("LocalVideoPip", "📹 Rendering local video PiP (recomposition)")
 
     Surface(
         modifier = modifier.size(120.dp, 160.dp),
@@ -805,16 +841,13 @@ private fun LocalVideoPip(modifier: Modifier) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                Log.d("LocalVideoPip", "📹 Creating renderer (factory)")
                 SurfaceViewRenderer(ctx).apply {
-                    // ✅ FIX: mirror=true для локального видео
                     WebRtcCallManager.prepareRenderer(this, mirror = true, overlay = true)
                     rendererReady = true
                 }
             },
             update = { view ->
                 if (rendererReady) {
-                    Log.d("LocalVideoPip", "📹 Binding local renderer (update)")
                     WebRtcCallManager.bindLocalRenderer(view)
                 }
             }
@@ -822,26 +855,20 @@ private fun LocalVideoPip(modifier: Modifier) {
     }
 }
 
-// ✅ FIX: Удаленное видео БЕЗ зеркала
 @Composable
 private fun RemoteVideoFullScreen(modifier: Modifier = Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
-    Log.d("RemoteVideoFullScreen", "📹 Rendering remote video fullscreen (recomposition)")
-
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
-            Log.d("RemoteVideoFullScreen", "📹 Creating renderer (factory)")
             SurfaceViewRenderer(ctx).apply {
-                // ✅ FIX: mirror=false для удаленного видео!
                 WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = false)
                 rendererReady = true
             }
         },
         update = { view ->
             if (rendererReady) {
-                Log.d("RemoteVideoFullScreen", "📹 Binding remote renderer (update)")
                 WebRtcCallManager.bindRemoteRenderer(view)
             }
         }
@@ -852,8 +879,6 @@ private fun RemoteVideoFullScreen(modifier: Modifier = Modifier) {
 private fun RemoteVideoPip(modifier: Modifier = Modifier) {
     var rendererReady by remember { mutableStateOf(false) }
 
-    Log.d("RemoteVideoPip", "📹 Rendering remote video PiP (recomposition)")
-
     Surface(
         modifier = modifier.size(120.dp, 160.dp),
         shape = RoundedCornerShape(20.dp),
@@ -863,7 +888,6 @@ private fun RemoteVideoPip(modifier: Modifier = Modifier) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                Log.d("RemoteVideoPip", "📹 Creating renderer (factory)")
                 SurfaceViewRenderer(ctx).apply {
                     WebRtcCallManager.prepareRenderer(this, mirror = false, overlay = true)
                     rendererReady = true
@@ -871,7 +895,6 @@ private fun RemoteVideoPip(modifier: Modifier = Modifier) {
             },
             update = { view ->
                 if (rendererReady) {
-                    Log.d("RemoteVideoPip", "📹 Binding remote renderer (update)")
                     WebRtcCallManager.bindRemoteRenderer(view)
                 }
             }

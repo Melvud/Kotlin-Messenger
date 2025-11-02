@@ -86,13 +86,12 @@ class CallActionReceiver : BroadcastReceiver() {
         scope.launch {
             try {
                 val db = FirebaseFirestore.getInstance()
-                db.collection("calls").document(callId)
-                    .update(
-                        mapOf(
-                            "status" to status,
-                            "endedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-                        )
-                    )
+                val auth = FirebaseAuth.getInstance()
+                val repo = CallsRepository(auth, db)
+
+                // Используем репозиторий для обновления статуса (который теперь включает endedAt)
+                repo.updateStatus(callId, status)
+
                 Log.d("CallActionReceiver", "Call $callId status updated to $status")
             } catch (e: Exception) {
                 Log.w("CallActionReceiver", "Failed to update call status to $status", e)
@@ -103,6 +102,7 @@ class CallActionReceiver : BroadcastReceiver() {
     private fun openCallScreen(ctx: Context, callId: String, username: String, isVideo: Boolean) {
         val activityIntent = Intent(ctx, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            // Эти deeplink-параметры обрабатываются в MainActivity
             putExtra("deeplink_callId", callId)
             putExtra("deeplink_isVideo", isVideo)
             putExtra("deeplink_username", username)

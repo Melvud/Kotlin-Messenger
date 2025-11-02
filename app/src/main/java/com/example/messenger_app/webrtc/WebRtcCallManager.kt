@@ -51,7 +51,7 @@ object WebRtcCallManager {
     private const val CALL_TIMEOUT_MS = 45_000L
     private const val RECONNECT_ATTEMPTS = 5
     private const val RECONNECT_DELAY_MS = 2_000L
-    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 200L  // Check more frequently (was 500ms)
+    private const val REMOTE_VIDEO_CHECK_INTERVAL_MS = 200L
     private const val STREAM_ID = "ANTIMAX_STREAM"
 
     private val _isMuted = MutableStateFlow(false)
@@ -66,7 +66,6 @@ object WebRtcCallManager {
     private val _isRemoteVideoEnabled = MutableStateFlow(false)
     val isRemoteVideoEnabled: StateFlow<Boolean> = _isRemoteVideoEnabled
 
-    // ✅ НОВОЕ: Синхронизированный timestamp начала звонка
     private val _callStartedAtMs = MutableStateFlow<Long?>(null)
     val callStartedAtMs: StateFlow<Long?> = _callStartedAtMs
 
@@ -88,7 +87,6 @@ object WebRtcCallManager {
         fun onCallTimeout(callId: String)
         fun onConnectionFailed(callId: String)
         fun onVideoUpgradeRequest()
-        // ✅ НОВОЕ: Callback для синхронизации времени
         fun onCallStarted(startTimeMs: Long)
     }
 
@@ -136,18 +134,15 @@ object WebRtcCallManager {
 
     fun init(context: Context) {
         if (::appContext.isInitialized) {
-            Log.d(TAG, "Already initialized")
             return
         }
 
-        Log.d(TAG, "🚀 INITIALIZING WebRTC")
         appContext = context.applicationContext
 
         try {
             System.loadLibrary("jingle_peerconnection_so")
-            Log.d(TAG, "✅ Native library loaded")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to load native library", e)
+            Log.e(TAG, "Failed to load native library", e)
         }
 
         val options = PeerConnectionFactory.InitializationOptions
@@ -156,10 +151,8 @@ object WebRtcCallManager {
             .createInitializationOptions()
 
         PeerConnectionFactory.initialize(options)
-        Log.d(TAG, "✅ PeerConnectionFactory initialized")
 
         eglBase = EglBase.create()
-        Log.d(TAG, "✅ EglBase created")
 
         val encoderFactory = DefaultVideoEncoderFactory(
             eglBase!!.eglBaseContext,
@@ -186,8 +179,6 @@ object WebRtcCallManager {
             .createPeerConnectionFactory()
 
         audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-        Log.d(TAG, "✅ WebRTC INITIALIZATION COMPLETE")
     }
 
     @Synchronized
@@ -199,8 +190,6 @@ object WebRtcCallManager {
     ) {
         require(::appContext.isInitialized) { "Call init(context) first!" }
         require(role == "caller" || role == "callee") { "Invalid role: $role" }
-
-        Log.d(TAG, "📞 START CALL: id=$callId, video=$isVideo, role=$role")
 
         if (isStarted.get() && currentCallId == callId) {
             Log.w(TAG, "Call already running, ignoring")
@@ -273,49 +262,37 @@ object WebRtcCallManager {
             candidateNetworkPolicy = PeerConnection.CandidateNetworkPolicy.ALL
         }
 
-        Log.d(TAG, "Creating PeerConnection...")
         peer = pcFactory!!.createPeerConnection(rtcConfig, pcObserver)
 
         if (peer == null) {
-            Log.e(TAG, "❌ FATAL: Failed to create PeerConnection")
+            Log.e(TAG, "FATAL: Failed to create PeerConnection")
             _connectionState.value = ConnectionState.FAILED
             endCallInternal(false)
             return
         }
-
-        Log.d(TAG, "✅ PeerConnection created")
 
         setupAudioTrack()
 
         if (isVideo) {
             createAndStartLocalVideoSync()
         }
-
-        Log.d(TAG, if (role == "caller") "Role=CALLER: waiting for onRenegotiationNeeded" else "Role=CALLEE: waiting for offer")
-        Log.d(TAG, "✅ START CALL COMPLETE")
     }
 
-    // ✅ НОВОЕ: Установка времени начала звонка из Firestore
     fun setCallStartTime(startTimeMs: Long) {
         if (_callStartedAtMs.value == null) {
             _callStartedAtMs.value = startTimeMs
-            Log.d(TAG, "✅ Call start time set to: $startTimeMs")
         }
     }
 
     fun endCall() {
-        Log.d(TAG, "endCall() called")
         endCallInternal(false)
     }
 
     @Synchronized
     private fun endCallInternal(disposeAudioModule: Boolean) {
         if (!isStarted.get()) {
-            Log.d(TAG, "Call not started, nothing to end")
             return
         }
-
-        Log.d(TAG, "🔚 END CALL")
 
         isStarted.set(false)
         _callStartedAtMs.value = null
@@ -344,7 +321,6 @@ object WebRtcCallManager {
         peer?.let {
             try {
                 it.close()
-                Log.d(TAG, "✅ PeerConnection closed")
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing peer", e)
             }
@@ -359,7 +335,6 @@ object WebRtcCallManager {
             audioTrack = null
             audioSource = null
             audioSender = null
-            Log.d(TAG, "✅ Audio disposed")
         } catch (e: Exception) {
             Log.e(TAG, "Error disposing audio", e)
         }
@@ -375,13 +350,9 @@ object WebRtcCallManager {
         remoteDescriptionSet = false
         pendingIceCandidates.clear()
         _isRemoteVideoEnabled.value = false
-
-        Log.d(TAG, "✅ END CALL COMPLETE")
     }
 
     private fun setupAudioTrack() {
-        Log.d(TAG, "🎤 SETTING UP AUDIO TRACK")
-
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
@@ -396,13 +367,10 @@ object WebRtcCallManager {
         audioTrack?.setEnabled(true)
 
         audioSender = peer?.addTrack(audioTrack, listOf(STREAM_ID))
-
-        Log.d(TAG, "✅ Audio track created: ${audioTrack?.id()}")
     }
 
     private fun setupAudioForCall(videoMode: Boolean) {
         val am = audioManager ?: return
-        Log.d(TAG, "Setting up audio for call (videoMode=$videoMode)")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val afr = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
@@ -412,9 +380,7 @@ object WebRtcCallManager {
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
-                .setOnAudioFocusChangeListener { focusChange ->
-                    Log.d(TAG, "Audio focus changed: $focusChange")
-                }
+                .setOnAudioFocusChangeListener { }
                 .build()
             audioFocusRequest = afr
             am.requestAudioFocus(afr)
@@ -439,13 +405,10 @@ object WebRtcCallManager {
 
         setSpeakerphone(am, shouldUseSpeaker)
         _isMuted.value = false
-
-        Log.d(TAG, "✅ Audio setup complete: speaker=$shouldUseSpeaker")
     }
 
     private fun teardownAudio() {
         val am = audioManager ?: return
-        Log.d(TAG, "Tearing down audio")
 
         try {
             am.mode = AudioManager.MODE_NORMAL
@@ -468,14 +431,12 @@ object WebRtcCallManager {
         }
 
         audioFocusRequest = null
-        Log.d(TAG, "✅ Audio teardown complete")
     }
 
     fun toggleMic() {
         val willMute = !_isMuted.value
         audioTrack?.setEnabled(!willMute)
         _isMuted.value = willMute
-        Log.d(TAG, "🎤 Microphone ${if (willMute) "MUTED" else "UNMUTED"}")
     }
 
     fun toggleSpeaker() {
@@ -487,7 +448,6 @@ object WebRtcCallManager {
         try {
             am.isSpeakerphoneOn = on
             _isSpeakerOn.value = on
-            Log.d(TAG, "🔊 Speakerphone ${if (on) "ON" else "OFF"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error setting speakerphone", e)
         }
@@ -527,10 +487,8 @@ object WebRtcCallManager {
     }
 
     private fun createAndStartLocalVideoSync() {
-        Log.d(TAG, "📹 CREATING LOCAL VIDEO (SYNC)")
-
         val capturer = createCameraCapturer() ?: run {
-            Log.e(TAG, "❌ Failed to create camera capturer")
+            Log.e(TAG, "Failed to create camera capturer")
             _isVideoEnabled.value = false
             return
         }
@@ -551,7 +509,6 @@ object WebRtcCallManager {
         )
 
         capturer.startCapture(1280, 720, 30)
-        Log.d(TAG, "✅ Camera capture started: 1280x720@30fps")
 
         videoTrack = pcFactory!!.createVideoTrack("VIDEO_${System.currentTimeMillis()}", videoSource)
         videoTrack?.setEnabled(true)
@@ -561,11 +518,8 @@ object WebRtcCallManager {
         _isVideoEnabled.value = true
 
         localRendererRef?.get()?.let {
-            Log.d(TAG, "Attaching video to local renderer")
             attachLocalSinkTo(it)
         }
-
-        Log.d(TAG, "✅ Video track created: ${videoTrack?.id()}")
     }
 
     private fun createCameraCapturer(): CameraVideoCapturer? {
@@ -573,41 +527,36 @@ object WebRtcCallManager {
 
         for (deviceName in enumerator.deviceNames) {
             if (enumerator.isFrontFacing(deviceName)) {
-                Log.d(TAG, "Using front camera: $deviceName")
                 return enumerator.createCapturer(deviceName, null)
             }
         }
 
         for (deviceName in enumerator.deviceNames) {
             if (!enumerator.isFrontFacing(deviceName)) {
-                Log.d(TAG, "Using back camera: $deviceName")
                 return enumerator.createCapturer(deviceName, null)
             }
         }
 
-        Log.e(TAG, "❌ No camera found!")
+        Log.e(TAG, "No camera found!")
         return null
     }
 
     fun switchCamera() {
         videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
-            override fun onCameraSwitchDone(isFrontFacing: Boolean) {
-                Log.d(TAG, "✅ Camera switched: front=$isFrontFacing")
-            }
+            override fun onCameraSwitchDone(isFrontFacing: Boolean) { }
 
             override fun onCameraSwitchError(errorDescription: String?) {
-                Log.e(TAG, "❌ Camera switch error: $errorDescription")
+                Log.e(TAG, "Camera switch error: $errorDescription")
             }
         })
     }
 
     fun toggleVideo() {
         val willEnable = !_isVideoEnabled.value
-        Log.d(TAG, "📹 TOGGLE VIDEO: $willEnable (connected=${_connectionState.value == ConnectionState.CONNECTED})")
 
         val p = peer
         if (p == null) {
-            Log.e(TAG, "❌ Cannot toggle video: peer is null")
+            Log.e(TAG, "Cannot toggle video: peer is null")
             return
         }
 
@@ -615,8 +564,9 @@ object WebRtcCallManager {
             if (videoTrack == null) {
                 createAndStartLocalVideoSync()
 
+                // 🐞 ИСПРАВЛЕНО: Вызываем renegotiation для ЛЮБОЙ роли.
+                // Проверка 'currentRole == "caller"' была ошибкой.
                 if (_connectionState.value == ConnectionState.CONNECTED) {
-                    Log.d(TAG, "✅ Connection active, triggering renegotiation")
                     mainHandler.postDelayed({
                         triggerRenegotiation()
                     }, 300)
@@ -630,8 +580,9 @@ object WebRtcCallManager {
             videoTrack?.setEnabled(false)
             _isVideoEnabled.value = false
 
+            // 🐞 ИСПРАВЛЕНО: Вызываем renegotiation для ЛЮБОЙ роли.
+            // Проверка 'currentRole == "caller"' была ошибкой.
             if (_connectionState.value == ConnectionState.CONNECTED) {
-                Log.d(TAG, "✅ Connection active, triggering renegotiation after disabling video")
                 mainHandler.postDelayed({
                     triggerRenegotiation()
                 }, 300)
@@ -646,11 +597,9 @@ object WebRtcCallManager {
         }
 
         if (!isRenegotiating.compareAndSet(false, true)) {
-            Log.w(TAG, "⚠️ Renegotiation already in progress, skipping")
+            Log.w(TAG, "Renegotiation already in progress, skipping")
             return
         }
-
-        Log.d(TAG, "🔄 TRIGGERING RENEGOTIATION (role=$currentRole)")
 
         val p = peer ?: run {
             Log.e(TAG, "Cannot renegotiate: peer is null")
@@ -661,15 +610,11 @@ object WebRtcCallManager {
         offerCreated.set(false)
 
         mainHandler.postDelayed({
-            // For mid-call changes (like toggling video), the person who made the change
-            // should create an offer regardless of their initial role
             createOffer()
         }, 100)
     }
 
     private fun disposeVideoChain() {
-        Log.d(TAG, "Disposing video chain...")
-
         try {
             videoSender?.let { peer?.removeTrack(it) }
         } catch (e: Exception) {
@@ -702,25 +647,18 @@ object WebRtcCallManager {
         videoSource = null
         videoSender = null
         _isVideoEnabled.value = false
-
-        Log.d(TAG, "✅ Video chain disposed")
     }
 
     fun requestVideoUpgrade() {
         if (_isVideoEnabled.value) {
-            Log.d(TAG, "Video already enabled")
             return
         }
-
-        Log.d(TAG, "📹 REQUESTING VIDEO UPGRADE")
 
         signalingDelegate?.onVideoUpgradeRequest()
         toggleVideo()
     }
 
     fun acceptVideoUpgrade() {
-        Log.d(TAG, "✅ ACCEPTING VIDEO UPGRADE")
-
         _videoUpgradeRequest.value = null
 
         if (!_isVideoEnabled.value) {
@@ -729,13 +667,10 @@ object WebRtcCallManager {
     }
 
     fun declineVideoUpgrade() {
-        Log.d(TAG, "❌ Declining video upgrade")
         _videoUpgradeRequest.value = null
     }
 
     fun onRemoteVideoUpgradeRequest(fromUsername: String) {
-        Log.d(TAG, "📹 REMOTE VIDEO UPGRADE REQUEST from: $fromUsername")
-
         _videoUpgradeRequest.value = VideoUpgradeRequest(fromUsername)
     }
 
@@ -754,14 +689,8 @@ object WebRtcCallManager {
             view.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
             view.setEnableHardwareScaler(true)
             initializedRenderers.add(view)
-            Log.d(TAG, "✅ Renderer initialized: overlay=$overlay, mirror=$mirror")
         }
 
-        // ℹ️ MIRRORING EXPLANATION:
-        // The setMirror() method ONLY affects the local display, NOT the transmitted video.
-        // - Local video preview: mirror=true (user sees themselves like in a mirror)
-        // - Remote video display: mirror=false (see remote user naturally)
-        // - Transmitted video: NEVER mirrored (WebRTC handles this automatically)
         view.setMirror(mirror)
     }
 
@@ -777,12 +706,9 @@ object WebRtcCallManager {
 
         localRendererRef = WeakReference(view)
         attachLocalSinkTo(view)
-        Log.d(TAG, "✅ Local renderer bound")
     }
 
     fun bindRemoteRenderer(view: SurfaceViewRenderer) {
-        Log.d(TAG, "🎬 BIND REMOTE RENDERER")
-
         val prev = remoteRendererRef?.get()
         if (prev != null && prev !== view) {
             try {
@@ -797,8 +723,6 @@ object WebRtcCallManager {
         if (remoteVideoTrack != null) {
             attachRemoteSinkTo(view)
         }
-
-        Log.d(TAG, "✅ Remote renderer bound")
     }
 
     private fun attachLocalSinkTo(view: SurfaceViewRenderer) {
@@ -806,7 +730,6 @@ object WebRtcCallManager {
             try {
                 videoTrack?.addSink(view)
                 view.invalidate()
-                Log.d(TAG, "✅ Local sink attached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error attaching local sink", e)
             }
@@ -818,7 +741,6 @@ object WebRtcCallManager {
             try {
                 remoteVideoTrack?.addSink(view)
                 view.invalidate()
-                Log.d(TAG, "✅ Remote sink attached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error attaching remote sink", e)
             }
@@ -836,7 +758,6 @@ object WebRtcCallManager {
                 } else {
                     remoteVideoTrack?.removeSink(view)
                 }
-                Log.d(TAG, "✅ ${if (local) "Local" else "Remote"} renderer detached")
             } catch (e: Exception) {
                 Log.e(TAG, "Error detaching renderer", e)
             }
@@ -864,8 +785,6 @@ object WebRtcCallManager {
     }
 
     private fun fixSdpSetup(sdp: String, role: String): String {
-        Log.d(TAG, "🔧 Fixing SDP setup attribute for role: $role")
-
         return when (role) {
             "caller" -> {
                 sdp.replace("a=setup:passive", "a=setup:actpass")
@@ -881,11 +800,11 @@ object WebRtcCallManager {
 
     private fun createOffer() {
         if (!offerCreated.compareAndSet(false, true)) {
-            Log.d(TAG, "⚠️ Offer already created, skipping")
+            Log.w(TAG, "Offer already created, skipping")
+            // Если мы триггернули ре-негациацию, мы ДОЛЖНЫ сбросить isRenegotiating
+            isRenegotiating.set(false)
             return
         }
-
-        Log.d(TAG, "Creating offer...")
 
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
@@ -901,21 +820,17 @@ object WebRtcCallManager {
                     return
                 }
 
-                // ✅ FIX: When creating an offer, always use "actpass" setup, regardless of initial role
-                // This is correct for both initial offers and renegotiation offers
                 val fixedSdp = fixSdpSetup(desc.description, "caller")
                 val fixedDesc = SessionDescription(desc.type, fixedSdp)
 
-                Log.d(TAG, "✅ Offer created (role=$currentRole), setting local description")
-
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
-                        Log.d(TAG, "✅ Local description set, sending to signaling")
                         signalingDelegate?.onLocalDescription(currentCallId ?: return, fixedDesc)
+                        // isRenegotiating сбрасывается только после получения ответа
                     }
 
                     override fun onSetFailure(error: String?) {
-                        Log.e(TAG, "❌ Failed to set local description: $error")
+                        Log.e(TAG, "Failed to set local description: $error")
                         offerCreated.set(false)
                         isRenegotiating.set(false)
                     }
@@ -923,7 +838,7 @@ object WebRtcCallManager {
             }
 
             override fun onCreateFailure(error: String?) {
-                Log.e(TAG, "❌ Failed to create offer: $error")
+                Log.e(TAG, "Failed to create offer: $error")
                 offerCreated.set(false)
                 isRenegotiating.set(false)
             }
@@ -931,8 +846,6 @@ object WebRtcCallManager {
     }
 
     private fun createAnswer() {
-        Log.d(TAG, "Creating answer (role=$currentRole)...")
-
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
@@ -946,53 +859,48 @@ object WebRtcCallManager {
                     return
                 }
 
-                // ✅ FIX: When creating an answer, always use "active" setup
-                // This is correct for both initial answers and renegotiation answers
                 val fixedSdp = fixSdpSetup(desc.description, "callee")
                 val fixedDesc = SessionDescription(desc.type, fixedSdp)
 
-                Log.d(TAG, "✅ Answer created, setting local description")
-
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
-                        Log.d(TAG, "✅ Local description set, sending to signaling")
                         signalingDelegate?.onLocalDescription(currentCallId ?: return, fixedDesc)
                         isRenegotiating.set(false)
+                        // FIX: Сброс флага, готовы к новой ре-негациации
+                        offerCreated.set(false)
                     }
 
                     override fun onSetFailure(error: String?) {
-                        Log.e(TAG, "❌ Failed to set local description: $error")
+                        Log.e(TAG, "Failed to set local description: $error")
                         isRenegotiating.set(false)
                     }
                 }, fixedDesc)
             }
 
             override fun onCreateFailure(error: String?) {
-                Log.e(TAG, "❌ Failed to create answer: $error")
+                Log.e(TAG, "Failed to create answer: $error")
                 isRenegotiating.set(false)
             }
         }, constraints)
     }
 
     fun applyRemoteOffer(sdp: String) {
-        Log.d(TAG, "📥 APPLY REMOTE OFFER (length: ${sdp.length})")
-
         val p = peer ?: run {
-            Log.e(TAG, "❌ FATAL: peer is null!")
+            Log.e(TAG, "FATAL: peer is null!")
             return
         }
+
+        // Устанавливаем isRenegotiating, так как мы обрабатываем OFFEr
+        isRenegotiating.set(true)
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdp)
 
         p.setRemoteDescription(object : SdpObserverAdapter() {
             override fun onSetSuccess() {
-                Log.d(TAG, "✅ Remote offer set successfully")
-
                 if (!remoteDescriptionSet) {
                     remoteDescriptionSet = true
 
                     if (pendingIceCandidates.isNotEmpty()) {
-                        Log.d(TAG, "Adding ${pendingIceCandidates.size} pending ICE candidates")
                         pendingIceCandidates.forEach { candidate ->
                             p.addIceCandidate(candidate)
                         }
@@ -1004,17 +912,15 @@ object WebRtcCallManager {
             }
 
             override fun onSetFailure(error: String?) {
-                Log.e(TAG, "❌ Failed to set remote offer: $error")
+                Log.e(TAG, "Failed to set remote offer: $error")
                 isRenegotiating.set(false)
             }
         }, offer)
     }
 
     fun applyRemoteAnswer(sdp: String) {
-        Log.d(TAG, "📥 APPLY REMOTE ANSWER (length: ${sdp.length})")
-
         val p = peer ?: run {
-            Log.e(TAG, "❌ FATAL: peer is null!")
+            Log.e(TAG, "FATAL: peer is null!")
             return
         }
 
@@ -1022,12 +928,12 @@ object WebRtcCallManager {
 
         p.setRemoteDescription(object : SdpObserverAdapter() {
             override fun onSetSuccess() {
-                Log.d(TAG, "✅ Remote answer set successfully")
                 remoteDescriptionSet = true
                 isRenegotiating.set(false)
+                // FIX: Сброс флага, готовы к новой ре-негациации
+                offerCreated.set(false)
 
                 if (pendingIceCandidates.isNotEmpty()) {
-                    Log.d(TAG, "Adding ${pendingIceCandidates.size} pending ICE candidates")
                     pendingIceCandidates.forEach { candidate ->
                         p.addIceCandidate(candidate)
                     }
@@ -1036,7 +942,7 @@ object WebRtcCallManager {
             }
 
             override fun onSetFailure(error: String?) {
-                Log.e(TAG, "❌ Failed to set remote answer: $error")
+                Log.e(TAG, "Failed to set remote answer: $error")
                 isRenegotiating.set(false)
             }
         }, answer)
@@ -1046,7 +952,6 @@ object WebRtcCallManager {
         val candidate = IceCandidate(mid, index, cand)
 
         if (!remoteDescriptionSet) {
-            Log.d(TAG, "Remote description not set yet, queuing ICE candidate")
             pendingIceCandidates.add(candidate)
             return
         }
@@ -1058,43 +963,32 @@ object WebRtcCallManager {
         }
 
         p.addIceCandidate(candidate)
-        Log.d(TAG, "✅ ICE candidate added: mid=$mid, index=$index")
     }
 
     private val pcObserver = object : PeerConnection.Observer {
 
-        override fun onSignalingChange(state: PeerConnection.SignalingState?) {
-            Log.d(TAG, "📡 Signaling state: $state")
-        }
+        override fun onSignalingChange(state: PeerConnection.SignalingState?) { }
 
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
-            Log.d(TAG, "🧊 ICE connection state: $state")
-
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED,
                 PeerConnection.IceConnectionState.COMPLETED -> {
                     mainHandler.post {
-                        // ✅ FIX: Сохраняем время в Firestore через delegate
                         if (_callStartedAtMs.value == null) {
                             val startTime = System.currentTimeMillis()
                             _callStartedAtMs.value = startTime
-
-                            // Сообщаем CallScreen что нужно сохранить время в Firestore
                             signalingDelegate?.onCallStarted(startTime)
-
-                            Log.d(TAG, "✅ Call started at: $startTime")
                         }
                         _connectionState.value = ConnectionState.CONNECTED
                         cancelCallTimeout()
                         cancelReconnect()
-                        Log.d(TAG, "✅ Call CONNECTED")
                     }
                 }
 
                 PeerConnection.IceConnectionState.DISCONNECTED -> {
                     mainHandler.post {
                         if (_connectionState.value == ConnectionState.CONNECTED) {
-                            Log.w(TAG, "⚠️ Connection lost, attempting reconnect...")
+                            Log.w(TAG, "Connection lost, attempting reconnect...")
                             attemptReconnect()
                         }
                     }
@@ -1102,7 +996,7 @@ object WebRtcCallManager {
 
                 PeerConnection.IceConnectionState.FAILED -> {
                     mainHandler.post {
-                        Log.e(TAG, "❌ ICE connection FAILED")
+                        Log.e(TAG, "ICE connection FAILED")
                         _connectionState.value = ConnectionState.FAILED
                     }
                 }
@@ -1111,48 +1005,32 @@ object WebRtcCallManager {
             }
         }
 
-        override fun onIceConnectionReceivingChange(receiving: Boolean) {
-            Log.d(TAG, "🧊 ICE receiving: $receiving")
-        }
+        override fun onIceConnectionReceivingChange(receiving: Boolean) { }
 
-        override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
-            Log.d(TAG, "🧊 ICE gathering: $state")
-        }
+        override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) { }
 
         override fun onIceCandidate(candidate: IceCandidate?) {
             if (candidate == null) return
-            Log.d(TAG, "🧊 Local ICE candidate: ${candidate.sdpMid}:${candidate.sdpMLineIndex}")
             signalingDelegate?.onIceCandidate(currentCallId ?: return, candidate)
         }
 
-        override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {
-            Log.d(TAG, "🧊 ICE candidates removed: ${candidates?.size}")
-        }
+        override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) { }
 
-        override fun onAddStream(stream: MediaStream?) {
-            Log.d(TAG, "📺 onAddStream (not used in Unified Plan)")
-        }
+        override fun onAddStream(stream: MediaStream?) { }
 
-        override fun onRemoveStream(stream: MediaStream?) {
-            Log.d(TAG, "📺 onRemoveStream")
-        }
+        override fun onRemoveStream(stream: MediaStream?) { }
 
-        override fun onDataChannel(dataChannel: org.webrtc.DataChannel?) {
-            Log.d(TAG, "📡 onDataChannel: ${dataChannel?.label()}")
-        }
+        override fun onDataChannel(dataChannel: org.webrtc.DataChannel?) { }
 
         override fun onRenegotiationNeeded() {
-            Log.d(TAG, "🔄 onRenegotiationNeeded")
             mainHandler.post {
+                // Оставляем эту проверку, чтобы "polite" peer (caller) обрабатывал
+                // автоматические renegotiation. Ручные обрабатываются в toggleVideo().
                 if (peer != null && isStarted.get() && currentRole == "caller") {
                     if (!offerCreated.get() && !isRenegotiating.get()) {
-                        Log.d(TAG, "Handling renegotiation - creating new offer")
-                        createOffer()
-                    } else {
-                        Log.d(TAG, "Skipping renegotiation: offer already created or renegotiation in progress")
+                        Log.d(TAG, "onRenegotiationNeeded() triggered, creating offer")
+                        triggerRenegotiation()
                     }
-                } else {
-                    Log.d(TAG, "Skipping renegotiation: peer=$peer, started=${isStarted.get()}, role=$currentRole")
                 }
             }
         }
@@ -1160,13 +1038,9 @@ object WebRtcCallManager {
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
             val track = receiver?.track() ?: return
 
-            Log.d(TAG, "🎬 ON ADD TRACK: ${track.kind()} (id: ${track.id()})")
-
             mainHandler.post {
                 when (track) {
                     is VideoTrack -> {
-                        Log.d(TAG, "📹 Remote VIDEO track received")
-
                         if (remoteVideoTrack != null) {
                             try {
                                 val view = remoteRendererRef?.get()
@@ -1177,45 +1051,35 @@ object WebRtcCallManager {
                         }
 
                         remoteVideoTrack = track
-                        // Don't force enable - respect the remote peer's video state
-                        // track.setEnabled(true)
-                        
+
                         val trackEnabled = track.enabled()
                         _isRemoteVideoEnabled.value = trackEnabled
 
-                        Log.d(TAG, "✅ Remote video track set, enabled: $trackEnabled")
-
-                        // Start monitoring the track state - this will update _isRemoteVideoEnabled
                         startMonitoringRemoteVideoTrack()
 
                         mainHandler.postDelayed({
                             val view = remoteRendererRef?.get()
                             if (view != null) {
                                 attachRemoteSinkTo(view)
-                                Log.d(TAG, "✅ Remote video attached to renderer")
                             } else {
-                                Log.w(TAG, "⚠️ Remote renderer view is null!")
+                                Log.w(TAG, "Remote renderer view is null!")
                             }
                         }, 100)
                     }
 
                     is AudioTrack -> {
                         track.setEnabled(true)
-                        Log.d(TAG, "✅ Remote AUDIO track enabled")
                     }
                 }
             }
         }
 
-        override fun onTrack(transceiver: RtpTransceiver?) {
-            val track = transceiver?.receiver?.track() ?: return
-            Log.d(TAG, "🎬 ON TRACK: ${track.kind()} (id: ${track.id()})")
-        }
+        override fun onTrack(transceiver: RtpTransceiver?) { }
     }
 
     private fun attemptReconnect() {
         if (reconnectAttempt >= RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "❌ Max reconnect attempts reached")
+            Log.e(TAG, "Max reconnect attempts reached")
             mainHandler.post {
                 _connectionState.value = ConnectionState.FAILED
                 signalingDelegate?.onConnectionFailed(currentCallId ?: return@post)
@@ -1225,7 +1089,6 @@ object WebRtcCallManager {
         }
 
         reconnectAttempt++
-        Log.d(TAG, "🔄 Reconnect attempt $reconnectAttempt/$RECONNECT_ATTEMPTS")
 
         mainHandler.post {
             _connectionState.value = ConnectionState.RECONNECTING
@@ -1237,7 +1100,6 @@ object WebRtcCallManager {
                 return@Runnable
             }
 
-            Log.d(TAG, "Restarting ICE...")
             peer?.restartIce()
         }
 
@@ -1255,7 +1117,7 @@ object WebRtcCallManager {
     private fun startCallTimeout(callId: String) {
         timeoutRunnable = Runnable {
             if (_connectionState.value != ConnectionState.CONNECTED) {
-                Log.e(TAG, "⏰ Call timeout!")
+                Log.e(TAG, "Call timeout!")
                 signalingDelegate?.onCallTimeout(callId)
                 endCallInternal(false)
             }
@@ -1270,89 +1132,43 @@ object WebRtcCallManager {
         }
     }
 
-    /**
-     * Starts monitoring the remote video track state.
-     * 
-     * This function creates a recurring task that checks the remote video track's enabled state
-     * every REMOTE_VIDEO_CHECK_INTERVAL_MS. When the state changes, it updates the
-     * _isRemoteVideoEnabled StateFlow, which triggers UI recomposition.
-     * 
-     * Thread Safety: Must be called on the main thread. Since this is a private method and all
-     * call sites are controlled (onAddTrack), thread safety is ensured by design. The monitoring
-     * runnable always executes on the main thread via mainHandler.
-     * 
-     * Lifecycle: Monitoring automatically stops when:
-     * - The call ends (isStarted becomes false)
-     * - The remote video track is removed (track becomes null)
-     * - stopMonitoringRemoteVideoTrack() is called explicitly
-     * 
-     * Note: It's safe to call this multiple times - any existing monitoring will be stopped first.
-     * The anonymous Runnable is intentional - monitoring is started once per call, so the overhead
-     * of object creation is negligible.
-     */
     private fun startMonitoringRemoteVideoTrack() {
-        // Stop any existing monitoring first (safe to call multiple times)
         stopMonitoringRemoteVideoTrack()
-        
+
         val runnable = object : Runnable {
             override fun run() {
-                // This runnable is always executed on main thread via mainHandler
-                
-                // Stop monitoring if call has ended
                 if (!isStarted.get()) {
-                    Log.d(TAG, "🛑 Call ended, stopping remote video monitoring")
                     remoteVideoCheckRunnable = null
                     return
                 }
-                
+
                 val track = remoteVideoTrack
                 if (track != null) {
                     val isEnabled = track.enabled()
                     val currentState = _isRemoteVideoEnabled.value
-                    
+
                     if (isEnabled != currentState) {
-                        Log.d(TAG, "📹 Remote video track state changed: $currentState -> $isEnabled")
                         _isRemoteVideoEnabled.value = isEnabled
                     }
-                    
-                    // Continue monitoring
+
                     mainHandler.postDelayed(this, REMOTE_VIDEO_CHECK_INTERVAL_MS)
                 } else {
-                    // Track was removed
                     if (_isRemoteVideoEnabled.value) {
-                        Log.d(TAG, "📹 Remote video track removed")
                         _isRemoteVideoEnabled.value = false
                     }
-                    // Stop monitoring since track is gone
                     remoteVideoCheckRunnable = null
                 }
             }
         }
-        
+
         remoteVideoCheckRunnable = runnable
         mainHandler.post(runnable)
-        Log.d(TAG, "✅ Started monitoring remote video track")
     }
 
-    /**
-     * Stops monitoring the remote video track state.
-     * 
-     * This function cancels any pending monitoring callbacks and cleans up the runnable reference.
-     * Safe to call multiple times or when monitoring is not active.
-     * 
-     * Thread Safety: Must be called on the main thread. Uses mainHandler.removeCallbacks
-     * which is thread-safe when called from the correct thread.
-     * 
-     * Should be called when:
-     * - The call ends (in endCallInternal)
-     * - Before starting new monitoring (in startMonitoringRemoteVideoTrack)
-     * - When explicitly stopping the call
-     */
     private fun stopMonitoringRemoteVideoTrack() {
         remoteVideoCheckRunnable?.let {
             mainHandler.removeCallbacks(it)
             remoteVideoCheckRunnable = null
-            Log.d(TAG, "🛑 Stopped monitoring remote video track")
         }
     }
 
