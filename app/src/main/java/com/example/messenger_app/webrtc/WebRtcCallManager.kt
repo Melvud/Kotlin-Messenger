@@ -222,32 +222,13 @@ object WebRtcCallManager {
         }
 
         val iceServers = listOf(
-            IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-            IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
-
             IceServer.builder("stun:sil-video.ru:3478").createIceServer(),
             IceServer.builder("turn:sil-video.ru:3478?transport=udp")
-                .setUsername("melvud")
-                .setPassword("berkut14")
-                .createIceServer(),
+                .setUsername("melvud").setPassword("berkut14").createIceServer(),
             IceServer.builder("turn:sil-video.ru:3478?transport=tcp")
-                .setUsername("melvud")
-                .setPassword("berkut14")
-                .createIceServer(),
+                .setUsername("melvud").setPassword("berkut14").createIceServer(),
             IceServer.builder("turns:sil-video.ru:443?transport=tcp")
-                .setUsername("melvud")
-                .setPassword("berkut14")
-                .createIceServer(),
-
-            IceServer.builder("turn:openrelay.metered.ca:80")
-                .setUsername("openrelayproject")
-                .setPassword("openrelayproject")
-                .createIceServer(),
-            IceServer.builder("turn:openrelay.metered.ca:443")
-                .setUsername("openrelayproject")
-                .setPassword("openrelayproject")
-                .createIceServer()
+                .setUsername("melvud").setPassword("berkut14").createIceServer()
         )
 
         val rtcConfig = RTCConfiguration(iceServers).apply {
@@ -383,14 +364,14 @@ object WebRtcCallManager {
                 .setOnAudioFocusChangeListener { }
                 .build()
             audioFocusRequest = afr
-            am.requestAudioFocus(afr)
+            try {
+                am.requestAudioFocus(afr)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to request audio focus", e)
+            }
         } else {
             @Suppress("DEPRECATION")
-            am.requestAudioFocus(
-                null,
-                AudioManager.STREAM_VOICE_CALL,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-            )
+            am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         }
 
         am.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -564,9 +545,9 @@ object WebRtcCallManager {
             if (videoTrack == null) {
                 createAndStartLocalVideoSync()
 
-                // ✅ FIX: Only "caller" should manually trigger renegotiation.
-                // For "callee", WebRTC will automatically fire onRenegotiationNeeded on the caller side.
-                if (_connectionState.value == ConnectionState.CONNECTED && currentRole == "caller") {
+                // TRIGGER renegotiation regardless of role — this fixes the problem
+                // where remote side doesn't see video until both enable it.
+                if (_connectionState.value == ConnectionState.CONNECTED) {
                     mainHandler.postDelayed({
                         triggerRenegotiation()
                     }, 300)
@@ -580,9 +561,7 @@ object WebRtcCallManager {
             videoTrack?.setEnabled(false)
             _isVideoEnabled.value = false
 
-            // ✅ FIX: Only "caller" should manually trigger renegotiation.
-            // For "callee", WebRTC will automatically fire onRenegotiationNeeded on the caller side.
-            if (_connectionState.value == ConnectionState.CONNECTED && currentRole == "caller") {
+            if (_connectionState.value == ConnectionState.CONNECTED) {
                 mainHandler.postDelayed({
                     triggerRenegotiation()
                 }, 300)
@@ -801,7 +780,6 @@ object WebRtcCallManager {
     private fun createOffer() {
         if (!offerCreated.compareAndSet(false, true)) {
             Log.w(TAG, "Offer already created, skipping")
-            // Если мы триггернули ре-негациацию, мы ДОЛЖНЫ сбросить isRenegotiating
             isRenegotiating.set(false)
             return
         }
@@ -826,7 +804,6 @@ object WebRtcCallManager {
                 peer?.setLocalDescription(object : SdpObserverAdapter() {
                     override fun onSetSuccess() {
                         signalingDelegate?.onLocalDescription(currentCallId ?: return, fixedDesc)
-                        // isRenegotiating сбрасывается только после получения ответа
                     }
 
                     override fun onSetFailure(error: String?) {
@@ -866,7 +843,6 @@ object WebRtcCallManager {
                     override fun onSetSuccess() {
                         signalingDelegate?.onLocalDescription(currentCallId ?: return, fixedDesc)
                         isRenegotiating.set(false)
-                        // FIX: Сброс флага, готовы к новой ре-негациации
                         offerCreated.set(false)
                     }
 
@@ -890,7 +866,6 @@ object WebRtcCallManager {
             return
         }
 
-        // Устанавливаем isRenegotiating, так как мы обрабатываем OFFEr
         isRenegotiating.set(true)
 
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdp)
@@ -930,7 +905,6 @@ object WebRtcCallManager {
             override fun onSetSuccess() {
                 remoteDescriptionSet = true
                 isRenegotiating.set(false)
-                // FIX: Сброс флага, готовы к новой ре-негациации
                 offerCreated.set(false)
 
                 if (pendingIceCandidates.isNotEmpty()) {
@@ -1024,8 +998,6 @@ object WebRtcCallManager {
 
         override fun onRenegotiationNeeded() {
             mainHandler.post {
-                // Оставляем эту проверку, чтобы "polite" peer (caller) обрабатывал
-                // автоматические renegotiation. Ручные обрабатываются в toggleVideo().
                 if (peer != null && isStarted.get() && currentRole == "caller") {
                     if (!offerCreated.get() && !isRenegotiating.get()) {
                         Log.d(TAG, "onRenegotiationNeeded() triggered, creating offer")
