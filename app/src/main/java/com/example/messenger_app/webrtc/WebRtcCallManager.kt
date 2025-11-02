@@ -564,9 +564,9 @@ object WebRtcCallManager {
             if (videoTrack == null) {
                 createAndStartLocalVideoSync()
 
-                // 🐞 ИСПРАВЛЕНО: Вызываем renegotiation для ЛЮБОЙ роли.
-                // Проверка 'currentRole == "caller"' была ошибкой.
-                if (_connectionState.value == ConnectionState.CONNECTED) {
+                // ✅ FIX: Only "caller" should manually trigger renegotiation.
+                // For "callee", WebRTC will automatically fire onRenegotiationNeeded on the caller side.
+                if (_connectionState.value == ConnectionState.CONNECTED && currentRole == "caller") {
                     mainHandler.postDelayed({
                         triggerRenegotiation()
                     }, 300)
@@ -580,9 +580,9 @@ object WebRtcCallManager {
             videoTrack?.setEnabled(false)
             _isVideoEnabled.value = false
 
-            // 🐞 ИСПРАВЛЕНО: Вызываем renegotiation для ЛЮБОЙ роли.
-            // Проверка 'currentRole == "caller"' была ошибкой.
-            if (_connectionState.value == ConnectionState.CONNECTED) {
+            // ✅ FIX: Only "caller" should manually trigger renegotiation.
+            // For "callee", WebRTC will automatically fire onRenegotiationNeeded on the caller side.
+            if (_connectionState.value == ConnectionState.CONNECTED && currentRole == "caller") {
                 mainHandler.postDelayed({
                     triggerRenegotiation()
                 }, 300)
