@@ -9,8 +9,6 @@
 
 **Antimax** is a production-ready, high-performance video, audio, and chat application for Android. It demonstrates a complete, full-stack solution integrating a modern **Jetpack Compose** UI with a powerful **WebRTC** media engine and a scalable **Firebase** backend.
 
-This repository serves as a professional portfolio piece, showcasing a deep understanding of real-time communication, modern Android development, and complex client-server architecture designed for reliability and scale.
-
 ---
 
 ## ✨ Core Features
