@@ -111,4 +111,7 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:core:1.5.0")
+
+    implementation("io.getstream:stream-chat-android-compose:6.0.12")
+    implementation("io.getstream:stream-chat-android-offline:6.0.12")
 }

@@ -49,6 +49,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
+import coil.load
+import coil.transform.CircleCropTransformation
+import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.tasks.await
 
 @Composable
 fun CallScreen(
@@ -85,6 +89,7 @@ fun CallScreen(
     var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
     var lastProcessedAnswerTime by remember { mutableStateOf<Long?>(null) }
     var lastProcessedUpgradeRequestTime by remember { mutableStateOf<Long?>(null) }
+    var peerPhotoUrl by remember { mutableStateOf<String?>(null) }
 
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
 
@@ -255,6 +260,22 @@ fun CallScreen(
                 if (name != peerName) {
                     peerName = name
                     Log.d("CallScreen", "✅ Peer name updated: $peerName")
+                    
+                    // Fetch photo
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val q = db.collection("users")
+                                .whereEqualTo("username", name)
+                                .limit(1).get().await()
+                            val userDoc = q.documents.firstOrNull()
+                            val url = userDoc?.getString("photoUrl")
+                            if (url != null) {
+                                peerPhotoUrl = url
+                            }
+                        } catch (e: Exception) {
+                            Log.e("CallScreen", "Failed to fetch peer photo", e)
+                        }
+                    }
                 }
             }
 
@@ -502,8 +523,9 @@ fun CallScreen(
             if (isLocalVideoEnabled && isRemoteVideoEnabled) {
                 preferLocalMainView = !preferLocalMainView
             }
-        }
-        // --- Конец Изменения 3 ---
+        },
+
+        peerPhotoUrl = peerPhotoUrl // Pass to ModernCallUI
     )
 
     videoUpgradeRequest?.let { request ->
@@ -586,7 +608,8 @@ private fun ModernCallUI(
     onSwitchCamera: () -> Unit,
     onHangup: () -> Unit,
     isLocalMainView: Boolean, // ✅ ИЗМЕНЕНИЕ 2: Параметр переименован
-    onToggleMainView: () -> Unit // ✅ ИЗМЕНЕНИЕ 2: Параметр переименован
+    onToggleMainView: () -> Unit, // ✅ ИЗМЕНЕНИЕ 2: Параметр переименован
+    peerPhotoUrl: String? = null
 ) {
     val isConnected = connectionState == WebRtcCallManager.ConnectionState.CONNECTED
 
@@ -609,17 +632,14 @@ private fun ModernCallUI(
             // 🐞 ИСПРАВЛЕНИЕ: Логика отображения видео полностью переписана для ясности.
             // ---
 
-            // Модификатор для переключения. Активен, только если ОБА видео есть.
-            val toggleModifier = if (isLocalVideoEnabled && isRemoteVideoEnabled) {
-                Modifier.clickable(onClick = onToggleMainView)
-            } else {
-                Modifier
-            }
+            // Модификатор для переключения больше не нужен для главного экрана
+            // val toggleModifier = ... 
 
             if (!isLocalVideoEnabled && !isRemoteVideoEnabled) {
                 // 1. Аудио-звонок: Оба видео выключены
                 ModernAudioContent(
                     peerName = peerName,
+                    photoUrl = peerPhotoUrl, // Pass photoUrl
                     isConnected = isConnected
                 )
             } else if (isLocalVideoEnabled && !isRemoteVideoEnabled) {
@@ -631,24 +651,24 @@ private fun ModernCallUI(
             } else {
                 // 4. Оба видео включены: Показываем одно в PiP, другое - на весь экран
                 if (isLocalMainView) {
-                    // Локальное - главное, Удаленное - PiP
-                    LocalVideoFullScreen(toggleModifier)
+                    // Локальное - главное (НЕ КЛИКАБЕЛЬНОЕ), Удаленное - PiP (КЛИКАБЕЛЬНОЕ)
+                    LocalVideoFullScreen(modifier = Modifier.fillMaxSize())
                     RemoteVideoPip(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(16.dp)
                             .zIndex(10f)
-                            .clickable(onClick = onToggleMainView) // PiP тоже кликабельный
+                            .clickable(onClick = onToggleMainView)
                     )
                 } else {
-                    // Удаленное - главное, Локальное - PiP
-                    RemoteVideoFullScreen(toggleModifier)
+                    // Удаленное - главное (НЕ КЛИКАБЕЛЬНОЕ), Локальное - PiP (КЛИКАБЕЛЬНОЕ)
+                    RemoteVideoFullScreen(modifier = Modifier.fillMaxSize())
                     LocalVideoPip(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(16.dp)
                             .zIndex(10f)
-                            .clickable(onClick = onToggleMainView) // PiP тоже кликабельный
+                            .clickable(onClick = onToggleMainView)
                     )
                 }
             }
@@ -905,6 +925,7 @@ private fun RemoteVideoPip(modifier: Modifier = Modifier) {
 @Composable
 private fun ModernAudioContent(
     peerName: String,
+    photoUrl: String?,
     isConnected: Boolean
 ) {
     Box(
@@ -962,13 +983,22 @@ private fun ModernAudioContent(
                 .border(4.dp, Color.White.copy(0.3f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = peerName.firstOrNull()?.uppercase() ?: "?",
-                style = MaterialTheme.typography.displayLarge,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 72.sp
-            )
+            if (photoUrl != null) {
+                coil.compose.AsyncImage(
+                    model = photoUrl,
+                    contentDescription = "Avatar",
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape)
+                )
+            } else {
+                Text(
+                    text = peerName.firstOrNull()?.uppercase() ?: "?",
+                    style = MaterialTheme.typography.displayLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 72.sp
+                )
+            }
         }
     }
 }

@@ -21,6 +21,7 @@ object NotificationHelper {
 
     const val INCOMING_CALL_CHANNEL_ID = "incoming_calls"
     const val ONGOING_CALL_CHANNEL_ID = "ongoing_calls"
+    const val MISSED_CALL_CHANNEL_ID = "missed_calls"
     const val TRAMPOLINE_NOTIFICATION_ID = 1002 // New
 
     fun ensureChannels(ctx: Context) {
@@ -56,6 +57,17 @@ object NotificationHelper {
 
         nm.createNotificationChannel(incoming)
         nm.createNotificationChannel(ongoing)
+
+        val missed = NotificationChannel(
+            MISSED_CALL_CHANNEL_ID,
+            "Missed calls",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Notifications for missed calls"
+            setShowBadge(true)
+            enableVibration(true)
+        }
+        nm.createNotificationChannel(missed)
     }
 
     // New function
@@ -125,6 +137,19 @@ object NotificationHelper {
     }
 
     internal fun notificationIdFor(callId: String): Int = 0x5550000 + abs(callId.hashCode())
+
+    fun showMissedCall(ctx: Context, callId: String, username: String) {
+        ensureChannels(ctx)
+        val n = NotificationCompat.Builder(ctx, MISSED_CALL_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_missed_call)
+            .setContentTitle("Пропущенный звонок")
+            .setContentText(username)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+
+        NotificationManagerCompat.from(ctx).notify(notificationIdFor(callId), n)
+    }
 
     private fun actionPi(
         ctx: Context,

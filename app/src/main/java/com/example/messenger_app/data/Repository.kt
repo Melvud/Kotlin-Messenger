@@ -16,8 +16,8 @@ import kotlinx.coroutines.tasks.await
 
 data class UserProfile(
     val uid: String = "",
-    val username: String = "",      // то, что видит пользователь
-    val handle: String = "",        // внутренний/бэкенд идентификатор
+    val username: String = "",      // уникальный id (начинается с @)
+    val name: String = "",          // отображаемое имя
     val email: String = "",
     val photoUrl: String? = null
 )
@@ -25,30 +25,25 @@ data class UserProfile(
 data class Contact(
     val id: String = "",
     val username: String = "",
-    val handle: String = "",
+    val name: String = "",
     val createdAt: Long? = null
 )
 
 private fun DocumentSnapshot.toUserProfile(): UserProfile? {
     val uid = id
-    val username = getString("username")
-        ?: getString("name")               // бэк-совместимость
-        ?: getString("handle")
-        ?: ""
-    val handle = getString("handle") ?: ""
+    val username = getString("username") ?: ""
+    val name = getString("name") ?: getString("username") ?: ""
     val email = getString("email") ?: ""
     val photoUrl = getString("photoUrl")
-    return UserProfile(uid, username, handle, email, photoUrl)
+    return UserProfile(uid, username, name, email, photoUrl)
 }
 
 private fun DocumentSnapshot.toContact(): Contact? {
     val id = id
-    val username = getString("username")
-        ?: getString("name")
-        ?: ""
-    val handle = getString("handle") ?: ""
+    val username = getString("username") ?: ""
+    val name = getString("name") ?: username
     val ts = getTimestamp("createdAt")?.toDate()?.time
-    return Contact(id, username, handle, ts)
+    return Contact(id, username, name, ts)
 }
 
 // --------- FCM ТОКЕНЫ ---------
@@ -96,28 +91,26 @@ class UserRepository(
         fcm.registerCurrentToken()
     }
 
-    suspend fun signUp(usernameInput: String, email: String, password: String) {
+    suspend fun signUp(usernameInput: String, nameInput: String, email: String, password: String) {
+        // 1. Проверяем уникальность username ДО создания пользователя
+        val cleanUsername = usernameInput.trim().lowercase().replace(Regex("[^a-z0-9_.]"), "")
+        val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
+        
+        if (!checkUsernameUnique(finalUsername)) {
+            throw IllegalArgumentException("Username $finalUsername is already taken")
+        }
+
         auth.createUserWithEmailAndPassword(email, password).await()
 
         val uid = auth.currentUser!!.uid
-        val username = usernameInput.ifBlank {
-            email.substringBefore("@")
-        }.lowercase().replace(Regex("[^a-z0-9_\\-.]"), "")
-
-        // handle — чисто бэкенд, можно оставить такой же как username или иным способом
-        val handle = username
+        val name = nameInput.ifBlank { "User" }
 
         val doc = db.collection("users").document(uid)
         val body = mapOf(
             "uid" to uid,
-            // UI-поля
-            "username" to username,
-            "username_lc" to username.lowercase(),
-            // для совместимости: name дублируем username
-            "name" to username,
-            // бэкенд-поля
-            "handle" to handle,
-            "handle_lc" to handle.lowercase(),
+            "username" to finalUsername,
+            "username_lc" to finalUsername.lowercase(),
+            "name" to name,
             "email" to email,
             "photoUrl" to null,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -125,6 +118,52 @@ class UserRepository(
         )
         doc.set(body).await()
         fcm.registerCurrentToken()
+    }
+
+    suspend fun checkUsernameUnique(username: String): Boolean {
+        val q = db.collection("users")
+            .whereEqualTo("username_lc", username.lowercase())
+            .limit(1)
+            .get()
+            .await()
+        return q.isEmpty
+    }
+
+    /** Flow текущего профиля пользователя (реальное время) */
+    fun currentUserProfileFlow(): Flow<UserProfile?> = callbackFlow {
+        val uid = auth.currentUser?.uid
+        if (uid == null) {
+            trySend(null)
+            close()
+            return@callbackFlow
+        }
+
+        val ref = db.collection("users").document(uid)
+        val reg = ref.addSnapshotListener { snap, err ->
+            if (err != null) {
+                // можно отправить null или залогировать
+                return@addSnapshotListener
+            }
+            trySend(snap?.toUserProfile())
+        }
+        awaitClose { reg.remove() }
+    }
+
+    suspend fun uploadProfilePicture(uri: android.net.Uri): String {
+        val uid = auth.currentUser?.uid ?: throw IllegalStateException("User not logged in")
+        val storageRef = com.google.firebase.storage.FirebaseStorage.getInstance().reference
+        val photoRef = storageRef.child("users/$uid/profile_image.jpg")
+
+        val metadata = com.google.firebase.storage.StorageMetadata.Builder()
+            .setContentType("image/jpeg")
+            .build()
+
+        photoRef.putFile(uri, metadata).await()
+        val downloadUrl = photoRef.downloadUrl.await().toString()
+
+        // Обновляем профиль
+        updateProfile(newPhotoUrl = downloadUrl)
+        return downloadUrl
     }
 
     private suspend fun ensureUserDoc() {
@@ -164,6 +203,77 @@ class UserRepository(
                     )
                 ).await()
             }
+        }
+    }
+
+
+    suspend fun updateProfile(
+        newUsername: String? = null,
+        newName: String? = null,
+        newEmail: String? = null,
+        newPassword: String? = null,
+        newPhotoUrl: String? = null
+    ) {
+        val user = auth.currentUser ?: throw IllegalStateException("User not logged in")
+        val uid = user.uid
+
+        // 0. Check username uniqueness if changing
+        if (newUsername != null) {
+             val cleanUsername = newUsername.trim().lowercase().replace(Regex("[^a-z0-9_.]"), "")
+             val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
+             
+             // Check if it's actually different from current
+             val currentDoc = db.collection("users").document(uid).get().await()
+             val currentUsername = currentDoc.getString("username")
+             
+             if (finalUsername != currentUsername) {
+                 if (!checkUsernameUnique(finalUsername)) {
+                     throw IllegalArgumentException("Username $finalUsername is already taken")
+                 }
+             }
+        }
+
+        // 1. Update Firebase Auth Profile (Display Name & Photo)
+        if (newName != null || newPhotoUrl != null) {
+            val profileUpdates = com.google.firebase.auth.UserProfileChangeRequest.Builder().apply {
+                if (newName != null) setDisplayName(newName)
+                if (newPhotoUrl != null) setPhotoUri(android.net.Uri.parse(newPhotoUrl))
+            }.build()
+            user.updateProfile(profileUpdates).await()
+        }
+
+        // 2. Update Email (Auth)
+        if (newEmail != null && newEmail != user.email) {
+            user.updateEmail(newEmail).await()
+        }
+
+        // 3. Update Password (Auth)
+        if (newPassword != null) {
+            user.updatePassword(newPassword).await()
+        }
+
+        // 4. Update Firestore User Document
+        val updates = mutableMapOf<String, Any>(
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (newUsername != null) {
+             val cleanUsername = newUsername.trim().lowercase().replace(Regex("[^a-z0-9_.]"), "")
+             val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
+            updates["username"] = finalUsername
+            updates["username_lc"] = finalUsername.lowercase()
+        }
+        if (newName != null) {
+            updates["name"] = newName
+        }
+        if (newEmail != null) {
+            updates["email"] = newEmail
+        }
+        if (newPhotoUrl != null) {
+            updates["photoUrl"] = newPhotoUrl
+        }
+
+        if (updates.size > 1) { // more than just timestamp
+            db.collection("users").document(uid).update(updates).await()
         }
     }
 }
@@ -245,7 +355,7 @@ class ContactsRepository(
                 myContacts,
                 mapOf(
                     "username" to otherProfile.username,
-                    "handle" to otherProfile.handle, // остаётся на бэкенд
+                    "name" to otherProfile.name,
                     "createdAt" to FieldValue.serverTimestamp()
                 ),
                 com.google.firebase.firestore.SetOptions.merge()
@@ -254,7 +364,7 @@ class ContactsRepository(
                 theirContacts,
                 mapOf(
                     "username" to meProfile.username,
-                    "handle" to meProfile.handle,
+                    "name" to meProfile.name,
                     "createdAt" to FieldValue.serverTimestamp()
                 ),
                 com.google.firebase.firestore.SetOptions.merge()

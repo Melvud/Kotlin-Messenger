@@ -15,7 +15,8 @@
   "main": "lib/index.js",
   "dependencies": {
     "firebase-admin": "^12.6.0",
-    "firebase-functions": "^6.0.1"
+    "firebase-functions": "^6.0.1",
+    "stream-chat": "^8.13.0"
   },
   "devDependencies": {
     "typescript": "^5.7.3",

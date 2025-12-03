@@ -1,5 +1,5 @@
-import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onCall, onRequest, HttpsError } from "firebase-functions/v2/https";
+import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
@@ -225,172 +225,137 @@ export const hangupOtherDevices = onCall(async (request) => {
 
 /**
  * ✅ ИСПРАВЛЕНО: ОТПРАВКА УВЕДОМЛЕНИЯ О НОВОМ СООБЩЕНИИ
+ * Вебхук для Stream Chat (событие message.new)
  */
-export const sendMessageNotification = onDocumentCreated(
-  "chats/{chatId}/messages/{messageId}",
-  async (event) => {
-    const message = event.data?.data();
-    if (!message) return;
+export const streamWebhook = onRequest(async (req, res) => {
+  const body = req.body;
+  console.log("[streamWebhook] Incoming webhook:", JSON.stringify(body));
 
-    const { chatId, messageId } = event.params;
-    const senderId = message.senderId;
-    const senderName = message.senderName || "Пользователь";
-    const messageType = message.type || "TEXT";
-    const messageStatus = message.status || "SENT";
-
-    console.log(`[sendMessageNotification] New message ${messageId} from ${senderId} in chat ${chatId}`);
-
-    if (messageStatus === "READ") {
-      console.log("[sendMessageNotification] Message already READ, skipping");
-      return;
-    }
-
-    const contentMap: Record<string, string> = {
-      TEXT: message.content || "Сообщение",
-      IMAGE: "📷 Фото",
-      VIDEO: "🎬 Видео",
-      FILE: "📎 Файл",
-      VOICE: "🎤 Голосовое",
-      STICKER: "😊 Стикер",
-    };
-
-    const content = contentMap[String(messageType)] || "Сообщение";
-    const notificationBody = messageType === "TEXT"
-      ? String(message.content || "").substring(0, 100)
-      : content;
-
-    const db = getFirestore();
-
-    const chatDoc = await db.collection("chats").doc(chatId).get();
-    if (!chatDoc.exists) {
-      console.error("[sendMessageNotification] Chat not found:", chatId);
-      return;
-    }
-
-    const chatData = chatDoc.data();
-    const participants = (chatData?.participants || []) as string[];
-    const recipients = participants.filter(p => p !== senderId);
-
-    if (recipients.length === 0) {
-      console.log("[sendMessageNotification] No recipients");
-      return;
-    }
-
-    const allTokens: string[] = [];
-    const tokenToDocRef: Record<string, DocumentReference> = {};
-    let hasDeliveredToAnyone = false;
-
-    for (const recipientId of recipients) {
-      const userDoc = await db.collection("users").doc(recipientId).get();
-      const activeChat = userDoc.data()?.activeChat;
-
-      if (activeChat === chatId) {
-        console.log(`[sendMessageNotification] User ${recipientId} is in active chat, skipping notification`);
-        hasDeliveredToAnyone = true;
-        continue;
-      }
-
-      const devicesSnap = await db.collection("users").doc(recipientId).collection("devices").get();
-      devicesSnap.docs.forEach((d) => {
-        const t = (d.data() as DeviceDoc).token;
-        if (typeof t === "string" && t.length > 0) {
-          allTokens.push(t);
-          tokenToDocRef[t] = d.ref;
-          hasDeliveredToAnyone = true;
-        }
-      });
-    }
-
-    console.log(`[sendMessageNotification] Sending to ${allTokens.length} devices`);
-
-    if (hasDeliveredToAnyone && messageStatus === "SENT") {
-      try {
-        await db.collection("chats").doc(chatId).collection("messages").doc(messageId).update({
-          status: "DELIVERED"
-        });
-        console.log(`[sendMessageNotification] Message ${messageId} -> DELIVERED`);
-      } catch (e) {
-        console.warn("[sendMessageNotification] Failed to update status:", e);
-      }
-    }
-
-    if (allTokens.length === 0) {
-      console.log("[sendMessageNotification] No tokens to send");
-      return;
-    }
-
-    const multicast = {
-      tokens: allTokens,
-      notification: {
-        title: senderName,
-        body: notificationBody
-      },
-      data: {
-        type: "message",
-        chatId: String(chatId),
-        messageId: String(messageId),
-        senderId: String(senderId),
-        senderName: String(senderName),
-        messageType: String(messageType),
-        content: String(message.content || content)
-      },
-      android: {
-        priority: "high" as const,
-        notification: {
-          channelId: "messages",
-          sound: "default",
-          priority: "high" as const,
-          color: "#2AABEE",
-          icon: "ic_notification",
-          tag: chatId,
-          notificationCount: 1
-        }
-      },
-      apns: {
-        headers: { "apns-priority": "10" },
-        payload: {
-          aps: {
-            sound: "default",
-            badge: 1,
-            alert: {
-              title: senderName,
-              body: notificationBody
-            },
-            "thread-id": chatId,
-            category: "MESSAGE_CATEGORY"
-          }
-        }
-      }
-    };
-
-    const res = await getMessaging().sendEachForMulticast(multicast);
-    console.log(
-      `[sendMessageNotification] sent: success=${res.successCount}, failure=${res.failureCount}`
-    );
-
-    const invalidDocRefs: DocumentReference[] = [];
-    res.responses.forEach((r, i) => {
-      if (!r.success) {
-        const token = allTokens[i];
-        const code = (r.error && (r.error as any).code) || "unknown";
-        if (
-          code === "messaging/registration-token-not-registered" ||
-          code === "messaging/invalid-registration-token"
-        ) {
-          const ref = tokenToDocRef[token];
-          if (ref) invalidDocRefs.push(ref);
-        }
-      }
-    });
-
-    if (invalidDocRefs.length > 0) {
-      const batch = db.batch();
-      invalidDocRefs.forEach((ref) => batch.delete(ref));
-      await batch.commit();
-      console.log("[sendMessageNotification] Removed invalid device docs:", invalidDocRefs.length);
-    }
+  if (body.type !== "message.new") {
+    console.log("[streamWebhook] Ignoring event type:", body.type);
+    res.status(200).send("Ignored");
+    return;
   }
-);
+
+  const message = body.message;
+  const senderId = message.user.id;
+  const channelId = body.channel_id;
+  const channelType = body.channel_type;
+  const members = body.members || [];
+
+  console.log(`[streamWebhook] New message in ${channelType}:${channelId} from ${senderId}`);
+
+  const db = getFirestore();
+  const messaging = getMessaging();
+
+  // Ищем получателей (все участники кроме отправителя)
+  const recipientIds = members
+    .map((m: any) => m.user_id)
+    .filter((uid: string) => uid !== senderId);
+
+  if (recipientIds.length === 0) {
+    console.log("[streamWebhook] No recipients found");
+    res.status(200).send("No recipients");
+    return;
+  }
+
+  console.log("[streamWebhook] Recipients:", recipientIds);
+
+  // Собираем токены всех получателей
+  const tokens: string[] = [];
+  for (const uid of recipientIds) {
+    const devicesSnap = await db.collection("users").doc(uid).collection("devices").get();
+    devicesSnap.docs.forEach((d) => {
+      const t = (d.data() as DeviceDoc).token;
+      if (t) tokens.push(t);
+    });
+  }
+
+  if (tokens.length === 0) {
+    console.log("[streamWebhook] No FCM tokens found for recipients");
+    res.status(200).send("No tokens");
+    return;
+  }
+
+  // Отправляем пуш
+  const payload = {
+    tokens,
+    data: {
+      type: "message.new",
+      cid: `${channelType}:${channelId}`,
+      channel_id: String(channelId),
+      channel_type: String(channelType),
+      sender_id: String(senderId),
+      sender_name: String(message.user.name || "User"),
+      text: String(message.text || "Photo/Video"),
+      message_id: String(message.id)
+    },
+    notification: {
+      title: String(message.user.name || "New Message"),
+      body: String(message.text || "Sent a file")
+    },
+    android: { priority: "high" as const },
+    apns: { headers: { "apns-priority": "10" } }
+  };
+
+  try {
+    const response = await messaging.sendEachForMulticast(payload);
+    console.log(`[streamWebhook] Sent ${response.successCount} notifications`);
+    res.status(200).send(`Sent ${response.successCount}`);
+  } catch (error) {
+    console.error("[streamWebhook] Error sending push:", error);
+    res.status(500).send("Error sending push");
+  }
+});
+
+/**
+ * ✅ ТЕСТОВОЕ УВЕДОМЛЕНИЕ (для отладки)
+ */
+export const sendTestPush = onCall(async (request) => {
+  const { auth } = request;
+  if (!auth) throw new HttpsError("unauthenticated", "Login required");
+
+  const uid = auth.uid;
+  console.log(`[sendTestPush] Request from user: ${uid}`);
+
+  const db = getFirestore();
+
+  const devicesSnap = await db.collection("users").doc(uid).collection("devices").get();
+  const tokens: string[] = [];
+  devicesSnap.docs.forEach((d) => {
+    const t = (d.data() as DeviceDoc).token;
+    if (t) tokens.push(t);
+  });
+
+  console.log(`[sendTestPush] Found ${tokens.length} tokens for user ${uid}`);
+
+  if (tokens.length === 0) {
+    console.warn(`[sendTestPush] ❌ No tokens found for user ${uid}`);
+    return { success: false, message: "No devices found" };
+  }
+
+  const res = await getMessaging().sendEachForMulticast({
+    tokens,
+    notification: {
+      title: "Test Push",
+      body: "If you see this, FCM is working!"
+    },
+    data: {
+      type: "test_push",
+      click_action: "FLUTTER_NOTIFICATION_CLICK"
+    }
+  });
+
+  console.log(`[sendTestPush] Sent: success=${res.successCount}, failure=${res.failureCount}`);
+
+  return {
+    success: true,
+    sent: res.successCount,
+    failed: res.failureCount,
+    tokensCount: tokens.length
+  };
+});
+
 
 /**
  * ✅ Автоматическое завершение звонков по таймауту
@@ -520,3 +485,45 @@ export const notifyVideoUpgrade = onDocumentUpdated(
     }
   }
 );
+
+/**
+ * ✅ ГЕНЕРАЦИЯ ТОКЕНА STREAM CHAT
+ */
+export const createStreamToken = onCall(async (request) => {
+  const { auth } = request;
+  if (!auth) {
+    throw new HttpsError("unauthenticated", "User must be logged in");
+  }
+
+  const uid = auth.uid;
+  console.log(`[createStreamToken] Generating token for user: ${uid}`);
+
+  try {
+    const { StreamChat } = await import("stream-chat");
+
+    // Инициализируем серверный клиент Stream
+    // API KEY и SECRET KEY из запроса пользователя
+    const apiKey = "ph9xg7m6nja5";
+    const secret = "cuuq7t667u5t25n69x3gd6adhmmfnguebkq7zxabh3ge5vejeqkdbfb2sn4jxpsr";
+
+    const serverClient = StreamChat.getInstance(apiKey, secret);
+
+    // Создаем токен (без срока действия или с долгим сроком)
+    const token = serverClient.createToken(uid);
+
+    console.log(`[createStreamToken] Token generated successfully for ${uid}`);
+
+    // Опционально: можно сразу создать/обновить пользователя в Stream
+
+    await serverClient.upsertUser({
+      id: uid,
+      name: auth.token.name || auth.token.username || "User",
+      image: auth.token.picture,
+    });
+
+    return { token };
+  } catch (error) {
+    console.error("[createStreamToken] Error generating token:", error);
+    throw new HttpsError("internal", "Failed to generate token");
+  }
+});

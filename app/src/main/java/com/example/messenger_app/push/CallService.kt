@@ -184,7 +184,7 @@ class CallService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Активный звонок",
-                NotificationManager.IMPORTANCE_LOW // ✅ НИЗКИЙ приоритет - не показывается на экране
+                NotificationManager.IMPORTANCE_DEFAULT // ✅ DEFAULT priority for visibility
             ).apply {
                 description = "Уведомления для активных звонков"
                 setSound(null, null) // ✅ Без звука
@@ -232,10 +232,9 @@ class CallService : Service() {
             .setSmallIcon(R.drawable.ic_call)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_LOW) // ✅ НИЗКИЙ приоритет
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT) // ✅ DEFAULT priority
             .setSound(null) // ✅ Без звука
             .setVibrate(null) // ✅ Без вибрации
-            .setSilent(true) // ✅ Тихое уведомление
             .addAction(R.drawable.ic_mic, "Микрофон", mutePending)
             .addAction(R.drawable.ic_speaker, "Динамик", speakerPending)
             .addAction(R.drawable.ic_hangup, "Завершить", hangupPending)

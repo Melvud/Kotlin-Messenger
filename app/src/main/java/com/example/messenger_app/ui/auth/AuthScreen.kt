@@ -22,6 +22,7 @@ fun AuthScreen(
     var isLogin by remember { mutableStateOf(true) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -41,8 +42,14 @@ fun AuthScreen(
                     Column(Modifier.fillMaxWidth()) {
                         if (!login) {
                             OutlinedTextField(
+                                value = username, onValueChange = { username = it },
+                                label = { Text("Username (@...)") }, singleLine = true,
+                                shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            OutlinedTextField(
                                 value = name, onValueChange = { name = it },
-                                label = { Text("Имя") }, singleLine = true,
+                                label = { Text("Display Name") }, singleLine = true,
                                 shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(Modifier.height(12.dp))
@@ -79,7 +86,10 @@ fun AuthScreen(
                                 if (isLogin) {
                                     AppGraph.userRepo.signIn(email.trim(), password)
                                 } else {
-                                    AppGraph.userRepo.signUp(name.trim(), email.trim(), password)
+                                    if (!username.startsWith("@")) {
+                                        throw IllegalArgumentException("Username must start with @")
+                                    }
+                                    AppGraph.userRepo.signUp(username.trim(), name.trim(), email.trim(), password)
                                 }
                             }.onSuccess {
                                 loading = false

@@ -25,6 +25,9 @@ import com.example.messenger_app.ui.auth.AuthScreen
 import com.example.messenger_app.ui.call.CallScreen
 import com.example.messenger_app.ui.chats.ChatScreen
 import com.example.messenger_app.ui.chats.ChatsListScreen
+import com.example.messenger_app.ui.chats.CreateChatScreen
+import com.example.messenger_app.ui.chats.CreateGroupChatScreen
+import com.example.messenger_app.ui.profile.ProfileScreen
 import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.update.AppUpdateManager
 import com.google.firebase.auth.FirebaseAuth
@@ -38,14 +41,17 @@ import kotlinx.coroutines.launch
 object Routes {
     const val AUTH = "auth"
     const val CHATS_LIST = "chats"
-    const val CHAT = "chats/{chatId}/{otherUserId}/{otherUserName}"
+    const val CREATE_CHAT = "create_chat"
+    const val CREATE_GROUP_CHAT = "create_group_chat"
+    const val PROFILE = "profile"
+    const val CHAT = "chats/{chatId}/{otherUserId}/{otherUserName}?isGroup={isGroup}"
     const val CALL_ROUTE = "call/{callId}?isVideo={isVideo}&playRingback={playRingback}&otherUsername={otherUsername}"
     const val CALL_DEEPLINK_BASE = "messenger://call/{callId}"
 
-    fun chatRoute(chatId: String?, otherUserId: String, otherUserName: String): String {
+    fun chatRoute(chatId: String?, otherUserId: String, otherUserName: String, isGroup: Boolean = false): String {
         val id = chatId ?: "new"
         val encoded = Uri.encode(otherUserName)
-        return "chats/$id/$otherUserId/$encoded"
+        return "chats/$id/$otherUserId/$encoded?isGroup=$isGroup"
     }
 
     fun callRoute(callId: String, isVideo: Boolean, otherUsername: String, playRingback: Boolean = true): String {
@@ -129,11 +135,49 @@ class MainActivity : ComponentActivity() {
 
                         composable(Routes.CHATS_LIST) {
                             ChatsListScreen(
-                                onChatClick = { chatId, otherUserId, otherUserName ->
-                                    navController.navigate(Routes.chatRoute(chatId, otherUserId, otherUserName))
+                                onChatClick = { chatId, otherUserId, otherUserName, isGroup ->
+                                    navController.navigate(Routes.chatRoute(chatId, otherUserId, otherUserName, isGroup))
                                 },
+                                onNewChatClick = {
+                                    navController.navigate(Routes.CREATE_CHAT)
+                                },
+                                onProfileClick = {
+                                    navController.navigate(Routes.PROFILE)
+                                }
+                            )
+                        }
+
+                        composable(Routes.CREATE_CHAT) {
+                            CreateChatScreen(
+                                onBack = { navController.popBackStack() },
+                                onContactSelected = { cid, userId, userName ->
+                                    navController.navigate(Routes.chatRoute(cid, userId, userName, false)) {
+                                        popUpTo(Routes.CHATS_LIST)
+                                    }
+                                },
+                                onCreateGroup = {
+                                    navController.navigate(Routes.CREATE_GROUP_CHAT)
+                                }
+                            )
+                        }
+
+                        composable(Routes.CREATE_GROUP_CHAT) {
+                            CreateGroupChatScreen(
+                                onBack = { navController.popBackStack() },
+                                onGroupCreated = { cid ->
+                                    navController.navigate(Routes.chatRoute(cid, "group", "Group Chat", true)) {
+                                        popUpTo(Routes.CHATS_LIST)
+                                    }
+                                }
+                            )
+                        }
+
+                        composable(Routes.PROFILE) {
+                            ProfileScreen(
+                                onBack = { navController.popBackStack() },
                                 onLogout = {
                                     FirebaseAuth.getInstance().signOut()
+                                    AppGraph.chatRepo.disconnectUser()
                                     navController.navigate(Routes.AUTH) {
                                         popUpTo(Routes.CHATS_LIST) { inclusive = true }
                                     }
@@ -146,24 +190,25 @@ class MainActivity : ComponentActivity() {
                             arguments = listOf(
                                 navArgument("chatId") { type = NavType.StringType },
                                 navArgument("otherUserId") { type = NavType.StringType },
-                                navArgument("otherUserName") { type = NavType.StringType }
+                                navArgument("otherUserName") { type = NavType.StringType },
+                                navArgument("isGroup") { type = NavType.BoolType; defaultValue = false }
                             )
                         ) { entry ->
                             val chatIdRaw = entry.arguments?.getString("chatId") ?: "new"
                             val chatId = if (chatIdRaw == "new" || chatIdRaw.isBlank()) null else chatIdRaw
                             val otherUserId = entry.arguments?.getString("otherUserId") ?: return@composable
                             val otherUserName = entry.arguments?.getString("otherUserName") ?: ""
+                            val isGroup = entry.arguments?.getBoolean("isGroup") ?: false
 
-                            // ✅ ИЗМЕНЕНИЕ: Флаг для защиты от двойного нажатия
                             var isCallStarting by remember { mutableStateOf(false) }
 
                             ChatScreen(
                                 chatId = chatId,
                                 otherUserId = otherUserId,
                                 otherUserName = otherUserName,
+                                isGroup = isGroup,
                                 onBack = { navController.popBackStack() },
                                 onAudioCall = { callId ->
-                                    // ✅ ИЗМЕНЕНИЕ: Защита от двойного нажатия
                                     if (isCallStarting) return@ChatScreen
                                     isCallStarting = true
 
@@ -171,18 +216,16 @@ class MainActivity : ComponentActivity() {
                                         navController.navigate(
                                             Routes.callRoute(callId, false, otherUserName, playRingback = true)
                                         )
-                                        // isCallStarting сбросится при возвращении на этот экран
                                     } else {
                                         android.util.Log.w("MainActivity", "Audio call permissions not granted")
                                         CoroutineScope(Dispatchers.Main).launch {
                                             snackbarHostState.showSnackbar("Необходимо разрешение на микрофон")
                                         }
                                         requestCallPermissions(includeCamera = false)
-                                        isCallStarting = false // 👈 Сбрасываем, если навигация не удалась
+                                        isCallStarting = false
                                     }
                                 },
                                 onVideoCall = { callId ->
-                                    // ✅ ИЗМЕНЕНИЕ: Защита от двойного нажатия
                                     if (isCallStarting) return@ChatScreen
                                     isCallStarting = true
 
@@ -190,14 +233,21 @@ class MainActivity : ComponentActivity() {
                                         navController.navigate(
                                             Routes.callRoute(callId, true, otherUserName, playRingback = true)
                                         )
-                                        // isCallStarting сбросится при возвращении на этот экран
                                     } else {
                                         android.util.Log.w("MainActivity", "Video call permissions not granted")
                                         CoroutineScope(Dispatchers.Main).launch {
                                             snackbarHostState.showSnackbar("Необходимы разрешения на камеру и микрофон")
                                         }
                                         requestCallPermissions(includeCamera = true)
-                                        isCallStarting = false // 👈 Сбрасываем, если навигация не удалась
+                                        isCallStarting = false
+                                    }
+                                },
+                                onDeleteChat = { cid ->
+                                    CoroutineScope(Dispatchers.IO).launch {
+                                        AppGraph.chatRepo.deleteChannel(cid)
+                                        CoroutineScope(Dispatchers.Main).launch {
+                                            navController.popBackStack()
+                                        }
                                     }
                                 }
                             )
@@ -245,7 +295,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val callsRepo = remember {
-                    // ✅ ИЗМЕНЕНИЕ: Конструктор теперь использует параметры по умолчанию
                     CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance())
                 }
 
@@ -267,6 +316,7 @@ class MainActivity : ComponentActivity() {
                     val chatIdToOpen = i.getStringExtra("chatId")
                     val otherUserIdToOpen = i.getStringExtra("otherUserId")
                     val otherUserNameToOpen = i.getStringExtra("otherUserName")
+                    val isGroupChat = i.getBooleanExtra("isGroup", false)
 
                     when {
                         action == "accept" && !callId.isNullOrBlank() -> {
@@ -303,10 +353,12 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        openChat && !chatIdToOpen.isNullOrBlank() && !otherUserIdToOpen.isNullOrBlank() -> {
-                            android.util.Log.d("MainActivity", "Open chat: chatId=$chatIdToOpen")
-                            val userName = otherUserNameToOpen ?: "User"
-                            navController.navigate(Routes.chatRoute(chatIdToOpen, otherUserIdToOpen, userName)) {
+                        openChat && !chatIdToOpen.isNullOrBlank() -> {
+                            android.util.Log.d("MainActivity", "Open chat: chatId=$chatIdToOpen, isGroup=$isGroupChat")
+                            val userName = otherUserNameToOpen ?: "Chat"
+                            val userId = if (otherUserIdToOpen.isNullOrBlank()) "group" else otherUserIdToOpen
+                            
+                            navController.navigate(Routes.chatRoute(chatIdToOpen, userId, userName, isGroupChat)) {
                                 launchSingleTop = true
                             }
                         }

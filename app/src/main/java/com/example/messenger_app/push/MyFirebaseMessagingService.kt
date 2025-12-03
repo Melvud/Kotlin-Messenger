@@ -30,11 +30,19 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         when (type) {
             "call" -> handleCallNotification(d)
-            "message" -> handleMessageNotification(message)
+            "message", "message.new" -> handleMessageNotification(message)
             "hangup" -> handleHangupNotification(d)
             "call_timeout" -> handleCallTimeout(d)
             "video_upgrade_request" -> handleVideoUpgradeRequest(d)
-            else -> Log.w("FCM", "Unknown notification type: $type")
+            "test_push" -> handleTestPush(d)
+            else -> {
+                // Fallback: if it has a cid or channel_id, treat as message
+                if (d.containsKey("cid") || d.containsKey("channel_id")) {
+                    handleMessageNotification(message)
+                } else {
+                    Log.w("FCM", "Unknown notification type: $type")
+                }
+            }
         }
     }
 
@@ -81,15 +89,17 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun handleMessageNotification(message: RemoteMessage) {
         val data = message.data
-        val chatId = data["chatId"] ?: return
-        val senderId = data["senderId"] ?: return
-        val senderName = data["senderName"] ?: "Пользователь"
-        val messageType = data["messageType"] ?: "TEXT"
+        // Stream Chat fields
+        val chatId = data["cid"] ?: data["channel_id"] ?: data["chatId"] ?: return
+        val senderId = data["sender_id"] ?: data["senderId"] ?: return
+        val senderName = data["sender_name"] ?: data["senderName"] ?: "Пользователь"
+        val messageType = data["type"] ?: "TEXT"
+        val text = data["text"] ?: data["content"] ?: "Новое сообщение"
 
         val title = message.notification?.title ?: senderName
-        val body = message.notification?.body ?: data["content"] ?: "Новое сообщение"
+        val body = message.notification?.body ?: text
 
-        Log.d("FCM", "Message notification: chatId=$chatId, sender=$senderName, type=$messageType")
+        Log.d("FCM", "Message notification received: chatId=$chatId, sender=$senderName, type=$messageType, text=$text")
 
         showMessageNotification(
             chatId = chatId,
@@ -102,12 +112,58 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun handleHangupNotification(data: Map<String, String>) {
         val callId = data["callId"] ?: return
+        
+        // Check if we have an active incoming call notification (meaning we haven't answered or declined yet)
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        var isRinging = false
+        var username = "Собеседник"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val notificationId = NotificationHelper.notificationIdFor(callId)
+            val activeNotification = nm.activeNotifications.find { it.id == notificationId }
+            if (activeNotification != null) {
+                isRinging = true
+                val extras = activeNotification.notification.extras
+                val text = extras.getCharSequence(android.app.Notification.EXTRA_TEXT)
+                if (!text.isNullOrBlank()) {
+                    username = text.toString()
+                }
+            }
+        }
+
+        if (isRinging) {
+            NotificationHelper.showMissedCall(applicationContext, callId, username)
+        }
+
         NotificationHelper.cancelIncomingCall(applicationContext, callId)
         OngoingCallStore.clear(applicationContext)
     }
 
     private fun handleCallTimeout(data: Map<String, String>) {
         val callId = data["callId"] ?: return
+        
+        // Check if we have an active incoming call notification
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        var isRinging = false
+        var username = "Собеседник"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val notificationId = NotificationHelper.notificationIdFor(callId)
+            val activeNotification = nm.activeNotifications.find { it.id == notificationId }
+            if (activeNotification != null) {
+                isRinging = true
+                val extras = activeNotification.notification.extras
+                val text = extras.getCharSequence(android.app.Notification.EXTRA_TEXT)
+                if (!text.isNullOrBlank()) {
+                    username = text.toString()
+                }
+            }
+        }
+
+        if (isRinging) {
+            NotificationHelper.showMissedCall(applicationContext, callId, username)
+        }
+        
         NotificationHelper.cancelIncomingCall(applicationContext, callId)
     }
 
@@ -115,6 +171,22 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         val callId = data["callId"] ?: return
         val fromUsername = data["fromUsername"] ?: "Собеседник"
         Log.d("FCM", "Video upgrade request from $fromUsername for call $callId")
+    }
+
+    private fun handleTestPush(data: Map<String, String>) {
+        Log.d("FCM", "Test push received")
+        ensureMessageChannel()
+        
+        val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Test Push")
+            .setContentText("FCM is working correctly!")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(9999, notificationBuilder.build())
     }
 
     private fun showMessageNotification(
@@ -146,19 +218,63 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                     else 0)
         )
 
+        // Mark as Read Action
+        val markReadIntent = Intent(this, MessageActionReceiver::class.java).apply {
+            action = MessageActionReceiver.ACTION_MARK_AS_READ
+            putExtra("cid", chatId)
+        }
+        val markReadPendingIntent = PendingIntent.getBroadcast(
+            this,
+            notificationId,
+            markReadIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        // Reply Action
+        val replyIntent = Intent(this, MessageActionReceiver::class.java).apply {
+            action = MessageActionReceiver.ACTION_REPLY
+            putExtra("cid", chatId)
+        }
+        val remoteInput = androidx.core.app.RemoteInput.Builder(MessageActionReceiver.KEY_TEXT_REPLY)
+            .setLabel("Ответить")
+            .build()
+
+        val replyPendingIntent = PendingIntent.getBroadcast(
+            this,
+            notificationId + 1,
+            replyIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0)
+        )
+
+        val replyAction = NotificationCompat.Action.Builder(
+            R.drawable.ic_notification,
+            "Ответить",
+            replyPendingIntent
+        ).addRemoteInput(remoteInput)
+         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
+         .setShowsUserInterface(true)
+         .build()
+
         val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
-        val person = Person.Builder()
+        // Person "Me" (current user)
+        val me = Person.Builder()
+            .setName("Вы") // Or get actual name if possible, but "You" is fine for self
+            .setKey(FirebaseAuth.getInstance().currentUser?.uid ?: "me")
+            .build()
+
+        // Person "Sender"
+        val senderPerson = Person.Builder()
             .setName(senderName)
             .setKey(senderId)
             .build()
 
-        val messagingStyle = NotificationCompat.MessagingStyle(person)
+        val messagingStyle = NotificationCompat.MessagingStyle(me)
             .setConversationTitle(senderName)
             .addMessage(
                 messageText,
                 System.currentTimeMillis(),
-                person
+                senderPerson
             )
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
@@ -172,6 +288,14 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             .setColor(0x2AABEE)
             .setGroup(MESSAGES_GROUP)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            .addAction(
+                NotificationCompat.Action.Builder(
+                    R.drawable.ic_notification,
+                    "Прочитать",
+                    markReadPendingIntent
+                ).setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ).build()
+            )
+            .addAction(replyAction)
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(notificationId, notificationBuilder.build())
