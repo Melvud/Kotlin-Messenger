@@ -46,11 +46,11 @@ class CallActionReceiver : BroadcastReceiver() {
 
         val auth = FirebaseAuth.getInstance()
         val db = FirebaseFirestore.getInstance()
-        val repo = CallsRepository(auth, db)
+        val repo = CallsRepository(auth, db, com.example.messenger_app.data.push.PushRepository(ctx))
         scope.launch {
             try {
-                repo.hangupOtherDevices(callId)
-                Log.d("CallActionReceiver", "Hangup other devices successful for $callId")
+                repo.acceptCall(callId)
+                Log.d("CallActionReceiver", "Call accepted and other devices hung up for $callId")
             } catch (e: Exception) {
                 Log.w("CallActionReceiver", "hangupOtherDevices failed", e)
             }
@@ -87,7 +87,35 @@ class CallActionReceiver : BroadcastReceiver() {
             try {
                 val db = FirebaseFirestore.getInstance()
                 val auth = FirebaseAuth.getInstance()
-                val repo = CallsRepository(auth, db)
+                // We need context for PushRepository, but we are in a CoroutineScope inside BroadcastReceiver.
+                // Ideally we should inject or pass context.
+                // Since this is a receiver, 'ctx' from onReceive might not be available here directly if not captured.
+                // But updateCallStatus is a member function, so we don't have 'ctx'.
+                // However, updateCallStatus is called from handleDecline/handleHangup which have 'ctx'.
+                // I need to change updateCallStatus signature to take context or create repo inside handlers.
+                // Let's create repo inside handlers and pass it, or just create it here if we can get context.
+                // Wait, updateCallStatus is a private method in CallActionReceiver.
+                // It doesn't have access to context unless passed.
+                // I will modify updateCallStatus to take Context.
+                
+                // For now, I'll just fix the compilation by creating a dummy PushRepository or passing context if possible.
+                // Actually, updateCallStatus is called from handleDecline(ctx, ...) and handleHangup(ctx, ...).
+                // So I can pass ctx to updateCallStatus.
+                
+                // But wait, I can't change the signature in this replace_file_content easily if I don't see the call sites.
+                // I'll assume I can pass context.
+                
+                // Let's modify updateCallStatus to take context.
+                // But first, let's just fix the instantiation here.
+                // I don't have context here.
+                // I will use AppGraph.pushRepo if initialized, or...
+                // AppGraph.pushRepo requires AppGraph.init(app) to be called.
+                // In a Receiver, AppGraph might be initialized if the app is running.
+                // If not, we might crash.
+                // But CallActionReceiver runs in the app process.
+                // So AppGraph.pushRepo should be available if App.onCreate ran.
+                // I will use AppGraph.pushRepo.
+                val repo = CallsRepository(auth, db, com.example.messenger_app.AppGraph.pushRepo)
 
                 // Используем репозиторий для обновления статуса (который теперь включает endedAt)
                 repo.updateStatus(callId, status)

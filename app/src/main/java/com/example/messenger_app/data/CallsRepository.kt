@@ -4,13 +4,13 @@ import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.functions.FirebaseFunctions
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import com.example.messenger_app.data.push.PushRepository
 
 data class CallInfo(
     val id: String,
@@ -19,11 +19,12 @@ data class CallInfo(
     val callType: String // "audio" | "video"
 )
 
+
+
 class CallsRepository(
     private val auth: FirebaseAuth,
     private val db: FirebaseFirestore,
-    // ✅ ИЗМЕНЕНИЕ: Добавлены параметры по умолчанию для scope и functions
-    private val functions: FirebaseFunctions = FirebaseFunctions.getInstance(),
+    private val pushRepository: PushRepository,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
 
@@ -67,23 +68,30 @@ class CallsRepository(
                         ?: "Пользователь"
 
                 // 2c) отправляем пуш ТОЛЬКО адресату
-                val data = mapOf(
-                    "toUserId" to calleeUid,
-                    "fromUserId" to me,
-                    "fromUsername" to fromUsername,
-                    "callId" to callId,
-                    "callType" to callType
-                )
+                val tokensSnapshot = db.collection("users").document(calleeUid).collection("devices").get().await()
+                val tokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
 
-                Log.d("CallsRepository", "Sending call notification: caller=$me, callee=$calleeUid, type=$callType")
-
-                runCatching {
-                    functions.getHttpsCallable("sendCallNotification")
-                        .call(data)
-                        .await()
-                }.onFailure { e ->
-                    Log.w("CallsRepository", "sendCallNotification failed: ${e.message}", e)
+                tokens.forEach { token ->
+                    pushRepository.sendDirectPush(
+                        targetToken = token,
+                        title = null, // Data-only push for calls to ensure onMessageReceived is called
+                        body = null,
+                        data = mapOf(
+                            "type" to "call",
+                            "callId" to callId,
+                            "callType" to callType,
+                            "callerUid" to me,
+                            "fromUserId" to me, // Added for compatibility
+                            "toUserId" to calleeUid, // Added for compatibility
+                            "callerName" to fromUsername,
+                            "fromUsername" to fromUsername, // Added for compatibility
+                            "isVideo" to (callType == "video").toString()
+                        )
+                    )
                 }
+
+                Log.d("CallsRepository", "Sent call notifications to ${tokens.size} devices")
+
             } catch (e: Exception) {
                 Log.e("CallsRepository", "Failed to start call in background", e)
                 // Опционально: обновить статус, если что-то пошло не так
@@ -146,14 +154,39 @@ class CallsRepository(
     /**
      * Сообщить другим устройствам того же пользователя, что этот экземпляр принял звонок
      */
+    suspend fun acceptCall(callId: String) {
+        updateStatus(callId, "answered")
+        hangupOtherDevices(callId)
+    }
+
+    /**
+     * Сообщить другим устройствам того же пользователя, что этот экземпляр принял звонок
+     */
     suspend fun hangupOtherDevices(callId: String) {
-        val acceptedToken = FirebaseMessaging.getInstance().token.await()
-        val data = mapOf(
-            "callId" to callId,
-            "acceptedToken" to acceptedToken
-        )
-        functions.getHttpsCallable("hangupOtherDevices")
-            .call(data)
-            .await()
+        val me = auth.currentUser?.uid ?: return
+        val currentToken = try {
+            FirebaseMessaging.getInstance().token.await()
+        } catch (e: Exception) {
+            Log.e("CallsRepository", "Failed to get current token", e)
+            return
+        }
+
+        val tokensSnapshot = db.collection("users").document(me).collection("devices").get().await()
+        val otherTokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
+            .filter { it != currentToken }
+
+        otherTokens.forEach { token ->
+            pushRepository.sendDirectPush(
+                targetToken = token,
+                title = null,
+                body = null,
+                data = mapOf(
+                    "type" to "hangup",
+                    "callId" to callId,
+                    "reason" to "answered_on_another_device"
+                )
+            )
+        }
+        Log.d("CallsRepository", "Sent hangup to ${otherTokens.size} other devices")
     }
 }

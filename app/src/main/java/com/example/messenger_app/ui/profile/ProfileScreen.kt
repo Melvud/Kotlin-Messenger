@@ -61,7 +61,7 @@ fun ProfileScreen(
                     val url = userRepo.uploadProfilePicture(uri)
                     // Sync with Stream Chat
                     try {
-                        AppGraph.chatRepo.updateStreamUser(userProfile?.name ?: "", url)
+                        // AppGraph.chatRepo.updateStreamUser(displayName, null) // RemovedrProfile?.name ?: "", url)
                     } catch (e: Exception) {
                         // ignore
                     }
@@ -198,11 +198,7 @@ fun ProfileScreen(
                     try {
                         userRepo.updateProfile(newName = newName)
                         // Sync with Stream Chat
-                        try {
-                            AppGraph.chatRepo.updateStreamUser(newName, userProfile?.photoUrl)
-                        } catch (e: Exception) {
-                            // ignore or log
-                        }
+                        // Removed AppGraph.chatRepo.updateStreamUser call
                         showNameDialog = false
                         snackbarHostState.showSnackbar("Имя обновлено")
                     } catch (e: Exception) {

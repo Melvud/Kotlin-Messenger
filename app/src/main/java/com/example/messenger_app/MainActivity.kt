@@ -19,14 +19,14 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navDeepLink
 import com.example.messenger_app.data.CallsRepository
-import com.example.messenger_app.push.FcmTokenManager
+import com.example.messenger_app.data.FcmTokenManager
 import com.example.messenger_app.push.NotificationHelper
 import com.example.messenger_app.ui.auth.AuthScreen
 import com.example.messenger_app.ui.call.CallScreen
-import com.example.messenger_app.ui.chats.ChatScreen
-import com.example.messenger_app.ui.chats.ChatsListScreen
-import com.example.messenger_app.ui.chats.CreateChatScreen
-import com.example.messenger_app.ui.chats.CreateGroupChatScreen
+import com.example.messenger_app.ui.chat.ChatScreen
+// import com.example.messenger_app.ui.chats.ChatsListScreen // Removed
+// import com.example.messenger_app.ui.chats.CreateChatScreen // Removed
+// import com.example.messenger_app.ui.chats.CreateGroupChatScreen // Removed
 import com.example.messenger_app.ui.profile.ProfileScreen
 import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.update.AppUpdateManager
@@ -121,7 +121,7 @@ class MainActivity : ComponentActivity() {
                                 onAuthed = {
                                     CoroutineScope(Dispatchers.IO).launch {
                                         runCatching {
-                                            FcmTokenManager.ensureCurrentTokenRegistered(applicationContext)
+                                            AppGraph.fcmTokenManager.registerCurrentToken()
                                         }.onFailure { e ->
                                             android.util.Log.e("MainActivity", "FCM token registration failed", e)
                                         }
@@ -134,7 +134,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable(Routes.CHATS_LIST) {
-                            ChatsListScreen(
+                            com.example.messenger_app.ui.chat.ChatsListScreen(
                                 onChatClick = { chatId, otherUserId, otherUserName, isGroup ->
                                     navController.navigate(Routes.chatRoute(chatId, otherUserId, otherUserName, isGroup))
                                 },
@@ -148,36 +148,28 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable(Routes.CREATE_CHAT) {
-                            CreateChatScreen(
+                            com.example.messenger_app.ui.chat.CreateChatScreen(
                                 onBack = { navController.popBackStack() },
-                                onContactSelected = { cid, userId, userName ->
-                                    navController.navigate(Routes.chatRoute(cid, userId, userName, false)) {
+                                onChatCreated = { chatId, otherUserId, otherUserName, isGroup ->
+                                    navController.navigate(Routes.chatRoute(chatId, otherUserId, otherUserName, isGroup)) {
                                         popUpTo(Routes.CHATS_LIST)
                                     }
-                                },
-                                onCreateGroup = {
-                                    navController.navigate(Routes.CREATE_GROUP_CHAT)
                                 }
                             )
                         }
 
+                        /*
                         composable(Routes.CREATE_GROUP_CHAT) {
-                            CreateGroupChatScreen(
-                                onBack = { navController.popBackStack() },
-                                onGroupCreated = { cid ->
-                                    navController.navigate(Routes.chatRoute(cid, "group", "Group Chat", true)) {
-                                        popUpTo(Routes.CHATS_LIST)
-                                    }
-                                }
-                            )
+                            CreateGroupChatScreen(...)
                         }
+                        */
 
                         composable(Routes.PROFILE) {
                             ProfileScreen(
                                 onBack = { navController.popBackStack() },
                                 onLogout = {
                                     FirebaseAuth.getInstance().signOut()
-                                    AppGraph.chatRepo.disconnectUser()
+                                    // AppGraph.chatRepo.disconnectUser() // Removed
                                     navController.navigate(Routes.AUTH) {
                                         popUpTo(Routes.CHATS_LIST) { inclusive = true }
                                     }
@@ -195,60 +187,26 @@ class MainActivity : ComponentActivity() {
                             )
                         ) { entry ->
                             val chatIdRaw = entry.arguments?.getString("chatId") ?: "new"
-                            val chatId = if (chatIdRaw == "new" || chatIdRaw.isBlank()) null else chatIdRaw
+                            val chatId = if (chatIdRaw == "new" || chatIdRaw.isBlank()) java.util.UUID.randomUUID().toString() else chatIdRaw
                             val otherUserId = entry.arguments?.getString("otherUserId") ?: return@composable
                             val otherUserName = entry.arguments?.getString("otherUserName") ?: ""
-                            val isGroup = entry.arguments?.getBoolean("isGroup") ?: false
-
-                            var isCallStarting by remember { mutableStateOf(false) }
+                            // val isGroup = entry.arguments?.getBoolean("isGroup") ?: false
 
                             ChatScreen(
                                 chatId = chatId,
-                                otherUserId = otherUserId,
-                                otherUserName = otherUserName,
-                                isGroup = isGroup,
-                                onBack = { navController.popBackStack() },
-                                onAudioCall = { callId ->
-                                    if (isCallStarting) return@ChatScreen
-                                    isCallStarting = true
-
-                                    if (checkCallPermissions(includeCamera = false)) {
-                                        navController.navigate(
-                                            Routes.callRoute(callId, false, otherUserName, playRingback = true)
+                                contactId = otherUserId,
+                                contactName = otherUserName,
+                                contactToken = "", // TODO: Fetch token
+                                onBackClick = { navController.popBackStack() },
+                                onNavigateToCall = { callInfo ->
+                                    navController.navigate(
+                                        Routes.callRoute(
+                                            callId = callInfo.id,
+                                            isVideo = callInfo.callType == "video",
+                                            otherUsername = otherUserName,
+                                            playRingback = true
                                         )
-                                    } else {
-                                        android.util.Log.w("MainActivity", "Audio call permissions not granted")
-                                        CoroutineScope(Dispatchers.Main).launch {
-                                            snackbarHostState.showSnackbar("Необходимо разрешение на микрофон")
-                                        }
-                                        requestCallPermissions(includeCamera = false)
-                                        isCallStarting = false
-                                    }
-                                },
-                                onVideoCall = { callId ->
-                                    if (isCallStarting) return@ChatScreen
-                                    isCallStarting = true
-
-                                    if (checkCallPermissions(includeCamera = true)) {
-                                        navController.navigate(
-                                            Routes.callRoute(callId, true, otherUserName, playRingback = true)
-                                        )
-                                    } else {
-                                        android.util.Log.w("MainActivity", "Video call permissions not granted")
-                                        CoroutineScope(Dispatchers.Main).launch {
-                                            snackbarHostState.showSnackbar("Необходимы разрешения на камеру и микрофон")
-                                        }
-                                        requestCallPermissions(includeCamera = true)
-                                        isCallStarting = false
-                                    }
-                                },
-                                onDeleteChat = { cid ->
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        AppGraph.chatRepo.deleteChannel(cid)
-                                        CoroutineScope(Dispatchers.Main).launch {
-                                            navController.popBackStack()
-                                        }
-                                    }
+                                    )
                                 }
                             )
                         }
@@ -295,7 +253,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val callsRepo = remember {
-                    CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance())
+                    CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance(), AppGraph.pushRepo)
                 }
 
                 fun handleIntent(i: Intent) {
@@ -397,7 +355,7 @@ class MainActivity : ComponentActivity() {
                     if (FirebaseAuth.getInstance().currentUser != null) {
                         CoroutineScope(Dispatchers.IO).launch {
                             runCatching {
-                                FcmTokenManager.ensureCurrentTokenRegistered(applicationContext)
+                                AppGraph.fcmTokenManager.registerCurrentToken()
                             }.onFailure { e ->
                                 android.util.Log.e("MainActivity", "FCM token registration failed", e)
                             }
@@ -494,6 +452,20 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(permissions.toTypedArray())
         } else {
             android.util.Log.d("MainActivity", "Call permissions already granted")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        CoroutineScope(Dispatchers.IO).launch {
+            AppGraph.userRepo.updateOnlineStatus(true)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        CoroutineScope(Dispatchers.IO).launch {
+            AppGraph.userRepo.updateOnlineStatus(false)
         }
     }
 

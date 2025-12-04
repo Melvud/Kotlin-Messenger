@@ -24,8 +24,8 @@ class MessageActionReceiver : BroadcastReceiver() {
         when (action) {
             ACTION_MARK_AS_READ -> {
                 scope.launch {
-                    ensureConnected()
-                    AppGraph.chatRepo.markChannelRead(cid)
+                    // ensureConnected()
+                    // AppGraph.chatRepo.markChannelRead(cid)
                     // Cancel notification
                     val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                     notificationManager.cancel(cid.hashCode())
@@ -37,9 +37,9 @@ class MessageActionReceiver : BroadcastReceiver() {
 
                 if (!replyText.isNullOrBlank()) {
                     scope.launch {
-                        ensureConnected()
-                        AppGraph.chatRepo.sendMessage(cid, replyText)
-                        AppGraph.chatRepo.markChannelRead(cid)
+                        // ensureConnected()
+                        // AppGraph.chatRepo.sendMessage(cid, replyText)
+                        // AppGraph.chatRepo.markChannelRead(cid)
                         
                         // Update notification to show "Replied" or cancel it
                         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
@@ -51,10 +51,12 @@ class MessageActionReceiver : BroadcastReceiver() {
     }
 
     private suspend fun ensureConnected() {
+        /*
         if (io.getstream.chat.android.client.ChatClient.instance().clientState.user.value == null) {
             Log.d("MessageActionReceiver", "User not connected, connecting...")
             AppGraph.chatRepo.connectUser()
         }
+        */
     }
 
     companion object {

@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("kotlin-kapt")
 }
 
 android {
@@ -14,7 +15,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.messenger_app"
+        val appId = System.getenv("APP_ID") ?: "com.family.messenger.local"
+        val appName = System.getenv("APP_NAME") ?: "Family Chat"
+        val aesKey = System.getenv("AES_SECRET") ?: "DEFAULT_DEV_KEY_0000000000000000"
+
+        applicationId = appId
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -23,6 +28,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         vectorDrawables.useSupportLibrary = true
+
+        resValue("string", "app_name", appName)
+        buildConfigField("String", "AES_KEY", "\"$aesKey\"")
     }
 
     buildTypes {
@@ -93,7 +101,9 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-storage")      // ✅ ДОБАВЛЕНО для чатов
     implementation("com.google.firebase:firebase-messaging")
-    implementation("com.google.firebase:firebase-functions")
+
+    // ==================== Lifecycle Service ====================
+    implementation("androidx.lifecycle:lifecycle-service:2.8.4")
 
     // ==================== Coroutines ====================
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
@@ -105,13 +115,19 @@ dependencies {
     // ==================== WebRTC ====================
     implementation("io.github.webrtc-sdk:android:137.7151.04")
 
+    // ==================== Google Auth ====================
+    implementation("com.google.auth:google-auth-library-oauth2-http:1.19.0")
+
     // ==================== Testing ====================
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:core:1.5.0")
-
-    implementation("io.getstream:stream-chat-android-compose:6.0.12")
-    implementation("io.getstream:stream-chat-android-offline:6.0.12")
+    implementation("com.google.code.gson:gson:2.10.1")
+    // ==================== Room ====================
+    val room_version = "2.7.0-alpha11"
+    implementation("androidx.room:room-runtime:$room_version")
+    implementation("androidx.room:room-ktx:$room_version")
+    kapt("androidx.room:room-compiler:$room_version")
 }

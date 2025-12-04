@@ -15,11 +15,19 @@ import com.example.messenger_app.R
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.example.messenger_app.AppGraph
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MyFirebaseMessagingService : FirebaseMessagingService() {
 
+
+
     override fun onNewToken(token: String) {
-        FcmTokenManager.onNewToken(applicationContext, token)
+        CoroutineScope(Dispatchers.IO).launch {
+            AppGraph.fcmTokenManager.registerToken(token)
+        }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -30,7 +38,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         when (type) {
             "call" -> handleCallNotification(d)
-            "message", "message.new" -> handleMessageNotification(message)
+            "message", "message.new", "message_new" -> handleMessageNotification(message)
             "hangup" -> handleHangupNotification(d)
             "call_timeout" -> handleCallTimeout(d)
             "video_upgrade_request" -> handleVideoUpgradeRequest(d)
@@ -131,7 +139,9 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             }
         }
 
-        if (isRinging) {
+        val reason = data["reason"]
+
+        if (isRinging && reason != "answered_on_another_device") {
             NotificationHelper.showMissedCall(applicationContext, callId, username)
         }
 

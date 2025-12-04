@@ -53,6 +53,7 @@ import coil.load
 import coil.transform.CircleCropTransformation
 import androidx.compose.ui.draw.clip
 import kotlinx.coroutines.tasks.await
+import com.example.messenger_app.AppGraph
 
 @Composable
 fun CallScreen(
@@ -82,9 +83,11 @@ fun CallScreen(
     var peerName by remember { mutableStateOf(otherUsername ?: "Собеседник") }
 
     val db = remember { FirebaseFirestore.getInstance() }
+
+
     // ✅ ПРИМЕЧАНИЕ: Конструктор CallsRepository использует параметры по умолчанию,
     // поэтому этот код будет работать с исправленной версией CallsRepository
-    val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db) }
+    val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db, AppGraph.pushRepo) }
 
     var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
     var lastProcessedAnswerTime by remember { mutableStateOf<Long?>(null) }

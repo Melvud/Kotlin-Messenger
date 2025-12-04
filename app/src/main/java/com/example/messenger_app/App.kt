@@ -3,17 +3,13 @@ package com.example.messenger_app
 import android.app.Application
 import android.provider.Settings
 import com.example.messenger_app.data.*
+import com.example.messenger_app.data.push.PushRepository
+import com.example.messenger_app.data.repository.ChatRepository
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.firestore
-import com.google.firebase.functions.FirebaseFunctions
 import com.google.firebase.Firebase
 import com.google.firebase.messaging.messaging
-import io.getstream.chat.android.client.ChatClient
-import io.getstream.chat.android.client.logger.ChatLogLevel
-import io.getstream.chat.android.offline.plugin.factory.StreamOfflinePluginFactory
-import io.getstream.chat.android.state.plugin.config.StatePluginConfig
-import io.getstream.chat.android.state.plugin.factory.StreamStatePluginFactory
 
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -33,17 +29,25 @@ class App : Application(), ImageLoaderFactory {
 }
 
 object AppGraph {
-    lateinit var userRepo: UserRepository
-        private set
-    lateinit var chatRepo: ChatRepository
-        private set
-    lateinit var contactsRepo: ContactsRepository
-        private set
     lateinit var fcmTokenManager: FcmTokenManager
         private set
     
-    // Stream Client
-    lateinit var chatClient: ChatClient
+    lateinit var pushRepo: PushRepository
+        private set
+
+    lateinit var chatRepo: ChatRepository
+        private set
+
+    lateinit var contactsRepo: ContactsRepository
+        private set
+
+    lateinit var userRepo: UserRepository
+        private set
+
+    lateinit var fileTransferManager: com.example.messenger_app.data.p2p.FileTransferManager
+        private set
+
+    lateinit var callsRepo: com.example.messenger_app.data.CallsRepository
         private set
 
     @Volatile private var initialized = false
@@ -55,38 +59,36 @@ object AppGraph {
         val auth = FirebaseAuth.getInstance()
         val db = Firebase.firestore
         val msg = Firebase.messaging
-        val functions = FirebaseFunctions.getInstance() // Correct way to get instance
         
-        val deviceId = Settings.Secure.getString(app.contentResolver, Settings.Secure.ANDROID_ID)
-        val deviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
-
-        // --- STREAM CHAT INIT ---
-        // Только API KEY (Secret Key здесь быть НЕ должно)
-        val apiKey = "ph9xg7m6nja5" 
+        var deviceId = Settings.Secure.getString(app.contentResolver, Settings.Secure.ANDROID_ID)
         
-        // Stream Chat v6 OfflinePluginFactory configuration
-        val offlinePluginFactory = StreamOfflinePluginFactory(app)
-        val statePluginFactory = StreamStatePluginFactory(
-            config = StatePluginConfig(
-                backgroundSyncEnabled = true,
-                userPresence = true
-            ),
-            appContext = app
-        )
+        // Fallback if ANDROID_ID is null or empty (e.g. emulator or some devices)
+        if (deviceId.isNullOrBlank() || deviceId == "9774d56d682e549c") { // Known generic ID
+            val prefs = app.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
+            deviceId = prefs.getString("device_uuid", null)
+            if (deviceId == null) {
+                deviceId = java.util.UUID.randomUUID().toString()
+                prefs.edit().putString("device_uuid", deviceId).apply()
+            }
+        }
 
-        chatClient = ChatClient.Builder(apiKey, app)
-            .withPlugins(offlinePluginFactory, statePluginFactory) // Use withPlugins
-            .logLevel(ChatLogLevel.ALL)
-            .build()
-        // ------------------------
-        // ------------------------
+        val deviceName = android.os.Build.MODEL // User requested Build.MODEL
 
         fcmTokenManager = FcmTokenManager(auth, db, msg, deviceId, deviceName)
         userRepo = UserRepository(auth, db, fcmTokenManager)
         
-        // Передаем Functions в репозиторий для получения токена
-        chatRepo = ChatRepository(chatClient, auth, functions)
+        pushRepo = PushRepository(app)
+        
+        val database = androidx.room.Room.databaseBuilder(
+            app,
+            com.example.messenger_app.data.local.AppDatabase::class.java,
+            "messenger-db"
+        ).build()
+        
+        chatRepo = ChatRepository(db, com.google.firebase.storage.FirebaseStorage.getInstance(), pushRepo, app, database)
         contactsRepo = ContactsRepository(auth, db)
+        callsRepo = com.example.messenger_app.data.CallsRepository(auth, db, pushRepo)
+        fileTransferManager = com.example.messenger_app.data.p2p.FileTransferManager(app, db)
 
         initialized = true
     }

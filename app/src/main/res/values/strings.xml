@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Antimax</string>
+
 
     <string name="channel_incoming_calls_name">Входящие звонки</string>
     <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>

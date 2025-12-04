@@ -19,7 +19,9 @@ data class UserProfile(
     val username: String = "",      // уникальный id (начинается с @)
     val name: String = "",          // отображаемое имя
     val email: String = "",
-    val photoUrl: String? = null
+    val photoUrl: String? = null,
+    val isOnline: Boolean = false,
+    val lastActive: Long = 0
 )
 
 data class Contact(
@@ -35,7 +37,9 @@ private fun DocumentSnapshot.toUserProfile(): UserProfile? {
     val name = getString("name") ?: getString("username") ?: ""
     val email = getString("email") ?: ""
     val photoUrl = getString("photoUrl")
-    return UserProfile(uid, username, name, email, photoUrl)
+    val isOnline = getBoolean("isOnline") ?: false
+    val lastActive = getLong("lastActive") ?: 0L
+    return UserProfile(uid, username, name, email, photoUrl, isOnline, lastActive)
 }
 
 private fun DocumentSnapshot.toContact(): Contact? {
@@ -274,6 +278,19 @@ class UserRepository(
 
         if (updates.size > 1) { // more than just timestamp
             db.collection("users").document(uid).update(updates).await()
+        }
+    }
+
+    suspend fun updateOnlineStatus(isOnline: Boolean) {
+        val uid = auth.currentUser?.uid ?: return
+        val updates = mapOf(
+            "isOnline" to isOnline,
+            "lastActive" to System.currentTimeMillis()
+        )
+        try {
+            db.collection("users").document(uid).update(updates).await()
+        } catch (e: Exception) {
+            // Ignore errors for status updates
         }
     }
 }

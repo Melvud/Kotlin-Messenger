@@ -1,0 +1,36 @@
+package com.example.messenger_app.data.model
+
+data class User(
+    val id: String = "",
+    val name: String = "",
+    val avatarUrl: String = "",
+    val token: String = ""
+)
+
+enum class MessageType {
+    TEXT, IMAGE, VIDEO, AUDIO, FILE, FILE_OFFER
+}
+
+data class Message(
+    val id: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val encryptedContent: String = "", // Stores text or file URL
+    val type: MessageType = MessageType.TEXT,
+    val timestamp: Long = System.currentTimeMillis(),
+    val replyToId: String? = null, // ID of the message being replied to
+    val replyPreview: String? = null, // Decrypted preview of the replied message (for UI)
+    val reactions: Map<String, String> = emptyMap(), // userId -> emoji
+    @get:com.google.firebase.firestore.PropertyName("isRead")
+    @set:com.google.firebase.firestore.PropertyName("isRead")
+    var isRead: Boolean = false
+)
+
+data class Chat(
+    val id: String = "",
+    val name: String = "",
+    val lastMessage: String = "",
+    val timestamp: Long = 0,
+    val participants: List<String> = emptyList(),
+    val isGroup: Boolean = false
+)
