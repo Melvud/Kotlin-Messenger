@@ -242,6 +242,30 @@ class ChatViewModel(
         }
     }
 
+    fun markAsRead(messageId: String) {
+        viewModelScope.launch {
+            try {
+                chatRepository.markAsRead(chatId, messageId)
+            } catch (e: Exception) {
+                // Ignore error
+            }
+        }
+    }
+
+    fun sendFileP2P(context: android.content.Context, uri: android.net.Uri) {
+        val intent = android.content.Intent(context, com.example.messenger_app.push.FileRelayService::class.java).apply {
+            action = com.example.messenger_app.push.FileRelayService.ACTION_START_HOSTING
+            putExtra(com.example.messenger_app.push.FileRelayService.EXTRA_FILE_URI, uri.toString())
+            putExtra(com.example.messenger_app.push.FileRelayService.EXTRA_CHAT_ID, chatId)
+            putExtra(com.example.messenger_app.push.FileRelayService.EXTRA_RECEIVER_ID, contactId)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+    }
+
     // P2P Transfer
     val transferStatus = fileTransferManager.transferStatus
     val transferProgress = fileTransferManager.progress
@@ -261,10 +285,16 @@ class ChatViewModel(
         val fileName = parts[1]
         val fileSize = parts[2].toLongOrNull() ?: 0L
 
+        Log.d("ChatViewModel", "Starting download for $fileName ($transferId)")
+
         viewModelScope.launch {
             try {
-                fileTransferManager.receiveTransfer(chatId, transferId, fileName, fileSize)
+                fileTransferManager.startDownloading(chatId, transferId).collect { state ->
+                    Log.d("ChatViewModel", "Download state: $state")
+                    // State is updated globally in FileTransferManager
+                }
             } catch (e: Exception) {
+                Log.e("ChatViewModel", "Download error", e)
                 _error.value = "Ошибка скачивания: ${e.message}"
             }
         }

@@ -19,6 +19,7 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         FirebaseApp.initializeApp(this)
         AppGraph.init(this)
+        com.example.messenger_app.webrtc.WebRtcCallManager.init(this)
     }
 
     override fun newImageLoader(): ImageLoader {

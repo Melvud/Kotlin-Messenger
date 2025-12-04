@@ -206,6 +206,12 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         messageText: String,
         messageType: String
     ) {
+        // Don't show notification if user is currently in this chat
+        if (com.example.messenger_app.AppState.activeChatId.value == chatId) {
+            Log.d("FCM", "User is in chat $chatId, suppressing notification")
+            return
+        }
+
         ensureMessageChannel()
 
         val notificationId = chatId.hashCode()

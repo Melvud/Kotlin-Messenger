@@ -1,22 +1,36 @@
 package com.example.messenger_app.data.p2p
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import com.example.messenger_app.data.model.IceCandidateModel
 import com.example.messenger_app.data.model.TransferSession
 import com.example.messenger_app.data.model.TransferStatus
+import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import org.json.JSONObject
 import org.webrtc.*
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.UUID
+
+sealed class TransferState {
+    object Idle : TransferState()
+    object Connecting : TransferState()
+    data class Transferring(val progress: Float) : TransferState()
+    data class Completed(val file: File?) : TransferState() // file is null for sender
+    data class Failed(val reason: String) : TransferState()
+}
 
 class FileTransferManager(
     private val context: Context,
@@ -26,254 +40,367 @@ class FileTransferManager(
     private val TAG = "FileTransferManager"
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var dataChannel: DataChannel? = null
-
-    private val _transferStatus = MutableStateFlow(TransferStatus.PENDING)
-    val transferStatus: StateFlow<TransferStatus> = _transferStatus.asStateFlow()
-
-    private val _progress = MutableStateFlow(0f)
-    val progress: StateFlow<Float> = _progress.asStateFlow()
-
-    private val _currentTransferId = MutableStateFlow<String?>(null)
-    val currentTransferId: StateFlow<String?> = _currentTransferId.asStateFlow()
-
+    
     // Transfer State
-    private var activeTransferId: String? = null // Renamed from currentTransferId to avoid conflict
-    private var currentChatId: String? = null
-    private var outgoingFile: File? = null
     private var incomingFile: File? = null
     private var incomingFileSize: Long = 0
     private var receivedBytes: Long = 0
+    private var incomingFileName: String = ""
 
-    init {
-        initializePeerConnectionFactory()
+    // Global State (for UI/Service observation)
+    private val _transferStatus = MutableStateFlow<TransferStatus>(TransferStatus.PENDING)
+    val transferStatus: kotlinx.coroutines.flow.StateFlow<TransferStatus> = _transferStatus
+
+    private val _progress = MutableStateFlow(0f)
+    val progress: kotlinx.coroutines.flow.StateFlow<Float> = _progress
+
+    private val _currentTransferId = MutableStateFlow<String?>(null)
+    val currentTransferId: kotlinx.coroutines.flow.StateFlow<String?> = _currentTransferId
+
+    fun cancelTransfer() {
+        cleanup(null, null) // Cleanup current
+        _transferStatus.value = TransferStatus.FAILED
+        _currentTransferId.value = null
+        _progress.value = 0f
     }
 
-    private fun initializePeerConnectionFactory() {
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions.builder(context)
-                .setEnableInternalTracer(true)
-                .createInitializationOptions()
-        )
+    // ==================== Hosting (Sender) ====================
 
-        val options = PeerConnectionFactory.Options()
-        peerConnectionFactory = PeerConnectionFactory.builder()
-            .setOptions(options)
-            .createPeerConnectionFactory()
-    }
+    fun startHosting(
+        chatId: String,
+        fileUri: Uri,
+        senderId: String,
+        receiverId: String
+    ): Flow<TransferState> = flow {
+        emit(TransferState.Connecting)
 
-    // ==================== Signaling & Connection ====================
-
-    fun startTransfer(chatId: String, file: File, receiverId: String, senderId: String): String {
-        currentChatId = chatId
-        outgoingFile = file
         val transferId = UUID.randomUUID().toString()
-        activeTransferId = transferId
         _currentTransferId.value = transferId
         _transferStatus.value = TransferStatus.CONNECTING
         _progress.value = 0f
+        val pcFactory = WebRtcCallManager.getPeerConnectionFactory() ?: run {
+            emit(TransferState.Failed("PeerConnectionFactory not initialized"))
+            return@flow
+        }
 
-        createPeerConnection()
-        createDataChannel()
+        // 1. Create PeerConnection
+        val rtcConfig = PeerConnection.RTCConfiguration(getIceServers()).apply {
+            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+        }
 
+        val stateFlow = MutableStateFlow<TransferState>(TransferState.Connecting)
+
+        peerConnection = pcFactory.createPeerConnection(rtcConfig, object : PeerConnectionObserverAdapter() {
+            override fun onIceCandidate(candidate: IceCandidate?) {
+                candidate?.let { sendIceCandidate(chatId, transferId, it, true) }
+            }
+
+            override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
+                Log.d(TAG, "Sender ICE State: $newState")
+                if (newState == PeerConnection.IceConnectionState.FAILED) {
+                    stateFlow.value = TransferState.Failed("ICE Connection Failed")
+                }
+            }
+        })
+
+        // 2. Create DataChannel
+        val init = DataChannel.Init()
+        init.ordered = true
+        dataChannel = peerConnection?.createDataChannel("file_transfer", init)
+        
+        dataChannel?.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+            override fun onStateChange() {
+                Log.d(TAG, "Sender DataChannel State: ${dataChannel?.state()}")
+                if (dataChannel?.state() == DataChannel.State.OPEN) {
+                    scope.launch {
+                        sendFile(fileUri, stateFlow)
+                    }
+                }
+            }
+            override fun onMessage(buffer: DataChannel.Buffer) {}
+        })
+
+        // 3. Create Offer
+        val constraints = MediaConstraints()
         peerConnection?.createOffer(object : SdpObserverAdapter() {
             override fun onCreateSuccess(sdp: SessionDescription?) {
                 sdp?.let {
                     peerConnection?.setLocalDescription(object : SdpObserverAdapter() {}, it)
-                    sendOffer(chatId, transferId, it.description, file.name, file.length(), senderId, receiverId)
+                    
+                    // Get file info for initial session data
+                    val contentResolver = context.contentResolver
+                    var fileName = "unknown_file"
+                    var fileSize = 0L
+                    
+                    contentResolver.query(fileUri, null, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                            if (nameIndex != -1) fileName = cursor.getString(nameIndex)
+                            if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                        }
+                    }
+
+                    createTransferSession(chatId, transferId, it.description, fileName, fileSize, senderId, receiverId)
                 }
             }
-        }, MediaConstraints())
+        }, constraints)
 
-        return transferId
+        // Listen for Answer
+        val answerListener = firestore.collection("chats").document(chatId)
+            .collection("transfers").document(transferId)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null && snapshot.exists()) {
+                    val answerSdp = snapshot.getString("answer")
+                    if (answerSdp != null && peerConnection?.remoteDescription == null) {
+
+                    }
+                }
+            }
+            
+        listenForCandidates(chatId, transferId, false)
+
+        // Emit updates from stateFlow
+        stateFlow.collect {
+            emit(it)
+            if (it is TransferState.Completed || it is TransferState.Failed) {
+                // Cleanup
+                answerListener.remove()
+                cleanup(chatId, transferId)
+            }
+        }
     }
 
-    fun receiveTransfer(chatId: String, transferId: String, fileName: String, fileSize: Long) {
-        currentChatId = chatId
-        activeTransferId = transferId
+    // ==================== Downloading (Receiver) ====================
+
+    fun startDownloading(
+        chatId: String,
+        transferId: String
+    ): Flow<TransferState> = flow {
+        Log.d(TAG, "startDownloading: $transferId")
+        emit(TransferState.Connecting)
+        
+        // Update Global State
         _currentTransferId.value = transferId
-        incomingFileSize = fileSize
-        receivedBytes = 0
         _transferStatus.value = TransferStatus.CONNECTING
         _progress.value = 0f
 
-        // Create temp file
-        incomingFile = File(context.cacheDir, "temp_${System.currentTimeMillis()}_$fileName")
+        val pcFactory = WebRtcCallManager.getPeerConnectionFactory() ?: run {
+            val error = "PeerConnectionFactory not initialized"
+            Log.e(TAG, error)
+            _transferStatus.value = TransferStatus.FAILED
+            emit(TransferState.Failed(error))
+            return@flow
+        }
+        Log.d(TAG, "PeerConnectionFactory obtained")
 
-        createPeerConnection()
+        val rtcConfig = PeerConnection.RTCConfiguration(getIceServers()).apply {
+            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+        }
 
-        // Listen for Offer
-        firestore.collection("chats").document(chatId)
-            .collection("transfers").document(transferId)
-            .get()
-            .addOnSuccessListener { document ->
-                val offerSdp = document.getString("offer")
-                if (offerSdp != null) {
-                    peerConnection?.setRemoteDescription(object : SdpObserverAdapter() {}, SessionDescription(SessionDescription.Type.OFFER, offerSdp))
-                    peerConnection?.createAnswer(object : SdpObserverAdapter() {
-                        override fun onCreateSuccess(sdp: SessionDescription?) {
-                            sdp?.let {
-                                peerConnection?.setLocalDescription(object : SdpObserverAdapter() {}, it)
-                                sendAnswer(chatId, transferId, it.description)
-                            }
-                        }
-                    }, MediaConstraints())
-                }
-            }
-        
-        listenForCandidates(chatId, transferId, isSender = false)
-    }
+        val stateFlow = MutableStateFlow<TransferState>(TransferState.Connecting)
 
-    private fun createPeerConnection() {
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        )
-
-        val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
-        rtcConfig.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-
-        peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnectionObserverAdapter() {
+        peerConnection = pcFactory.createPeerConnection(rtcConfig, object : PeerConnectionObserverAdapter() {
             override fun onIceCandidate(candidate: IceCandidate?) {
-                candidate?.let {
-                    if (currentChatId != null && activeTransferId != null) {
-                        sendIceCandidate(currentChatId!!, activeTransferId!!, it, isSender = outgoingFile != null)
-                    }
-                }
+                candidate?.let { sendIceCandidate(chatId, transferId, it, false) }
             }
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
-                Log.d(TAG, "ICE State: $newState")
-                if (newState == PeerConnection.IceConnectionState.CONNECTED) {
-                    if (outgoingFile != null) {
-                        // Sender: Start sending when connected and DataChannel is ready
-                    }
-                } else if (newState == PeerConnection.IceConnectionState.FAILED || newState == PeerConnection.IceConnectionState.DISCONNECTED) {
-                    _transferStatus.value = TransferStatus.FAILED
-                    cleanupTransfer()
+                Log.d(TAG, "Receiver ICE State: $newState")
+                 if (newState == PeerConnection.IceConnectionState.FAILED) {
+                    stateFlow.value = TransferState.Failed("ICE Connection Failed")
                 }
             }
 
             override fun onDataChannel(dc: DataChannel?) {
-                // Receiver gets DataChannel here
                 dc?.let {
                     dataChannel = it
-                    setupDataChannelObserver(it)
+                    it.registerObserver(object : DataChannel.Observer {
+                        override fun onBufferedAmountChange(previousAmount: Long) {}
+                        override fun onStateChange() {}
+                        override fun onMessage(buffer: DataChannel.Buffer) {
+                            handleIncomingMessage(buffer, stateFlow)
+                        }
+                    })
                 }
             }
         })
-    }
 
-    private fun createDataChannel() {
-        val init = DataChannel.Init()
-        init.ordered = true
-        init.negotiated = false // We negotiate via SDP
-        
-        dataChannel = peerConnection?.createDataChannel("file_transfer", init)
-        dataChannel?.let { setupDataChannelObserver(it) }
-    }
+        // Get Offer
+        try {
+            val doc = firestore.collection("chats").document(chatId)
+                .collection("transfers").document(transferId)
+                .get().await()
+            
+            val offerSdp = doc.getString("offer") ?: throw Exception("No offer found")
+            
 
-    private fun setupDataChannelObserver(dc: DataChannel) {
-        dc.registerObserver(object : DataChannel.Observer {
-            override fun onBufferedAmountChange(previousAmount: Long) {}
 
-            override fun onStateChange() {
-                Log.d(TAG, "DataChannel State: ${dc.state()}")
-                if (dc.state() == DataChannel.State.OPEN) {
-                    if (outgoingFile != null) {
-                        sendFileData()
-                    }
+        } catch (e: Exception) {
+            val error = "Failed to get offer: ${e.message}"
+            _transferStatus.value = TransferStatus.FAILED
+            emit(TransferState.Failed(error))
+            return@flow
+        }
+
+        listenForCandidates(chatId, transferId, true)
+
+        stateFlow.collect { state ->
+            // Update Global State
+            when (state) {
+                is TransferState.Connecting -> _transferStatus.value = TransferStatus.CONNECTING
+                is TransferState.Transferring -> {
+                    _transferStatus.value = TransferStatus.TRANSFERRING
+                    _progress.value = state.progress
                 }
-            }
-
-            override fun onMessage(buffer: DataChannel.Buffer) {
-                if (!buffer.binary) return
-                handleIncomingData(buffer.data)
-            }
-        })
-    }
-
-    // ==================== Data Transfer ====================
-
-    private fun sendFileData() {
-        scope.launch {
-            _transferStatus.value = TransferStatus.TRANSFERRING
-            val file = outgoingFile ?: return@launch
-            val buffer = ByteArray(16 * 1024) // 16KB chunks
-            val totalBytes = file.length()
-            var sentBytes: Long = 0
-
-            try {
-                file.inputStream().use { input ->
-                    var bytesRead = input.read(buffer)
-                    while (bytesRead != -1) {
-                        if (dataChannel?.state() != DataChannel.State.OPEN) break
-
-                        val chunk = ByteBuffer.wrap(buffer, 0, bytesRead)
-                        val dataBuffer = DataChannel.Buffer(chunk, true)
-                        dataChannel?.send(dataBuffer)
-
-                        sentBytes += bytesRead
-                        _progress.value = sentBytes.toFloat() / totalBytes
-
-                        bytesRead = input.read(buffer)
-                        // Simple flow control
-                        // Thread.sleep(5) 
-                    }
+                is TransferState.Completed -> {
+                    _transferStatus.value = TransferStatus.COMPLETED
+                    _progress.value = 1f
                 }
-                _transferStatus.value = TransferStatus.COMPLETED
-                Log.d(TAG, "File sent successfully")
-                cleanupTransfer()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error sending file", e)
-                _transferStatus.value = TransferStatus.FAILED
-                cleanupTransfer()
+                is TransferState.Failed -> _transferStatus.value = TransferStatus.FAILED
+                else -> {}
+            }
+            
+            emit(state)
+            if (state is TransferState.Completed || state is TransferState.Failed) {
+                cleanup(chatId, transferId)
             }
         }
     }
 
-    private fun handleIncomingData(data: ByteBuffer) {
-        try {
-            val bytes = ByteArray(data.remaining())
-            data.get(bytes)
-            
-            incomingFile?.appendBytes(bytes)
-            receivedBytes += bytes.size
-            
-            if (incomingFileSize > 0) {
-                _progress.value = receivedBytes.toFloat() / incomingFileSize
-            }
+    // ==================== Logic ====================
 
-            if (receivedBytes >= incomingFileSize) {
-                _transferStatus.value = TransferStatus.COMPLETED
-                Log.d(TAG, "File received successfully: ${incomingFile?.absolutePath}")
-                
-                // Move to Downloads
-                try {
-                    val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                    if (!downloadsDir.exists()) downloadsDir.mkdirs()
-                    val finalFile = File(downloadsDir, incomingFile?.name?.removePrefix("temp_${System.currentTimeMillis()}_") ?: "received_file")
-                    incomingFile?.copyTo(finalFile, overwrite = true)
-                    incomingFile?.delete()
-                    Log.d(TAG, "File moved to: ${finalFile.absolutePath}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error moving file to downloads", e)
+    private suspend fun sendFile(uri: Uri, stateFlow: MutableStateFlow<TransferState>) {
+        try {
+            val contentResolver = context.contentResolver
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                // 1. Get File Info
+                var fileName = "file"
+                var fileSize = 0L
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                        if (nameIndex != -1) fileName = cursor.getString(nameIndex)
+                        if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                    }
                 }
-                cleanupTransfer()
-            } else {
-                _transferStatus.value = TransferStatus.TRANSFERRING
+
+                // 2. Send Header
+                val headerJson = JSONObject().apply {
+                    put("name", fileName)
+                    put("size", fileSize)
+                    put("mime", contentResolver.getType(uri) ?: "application/octet-stream")
+                }
+                val headerBytes = headerJson.toString().toByteArray()
+                val headerBuffer = DataChannel.Buffer(ByteBuffer.wrap(headerBytes), false) // false = text/string (but we send as binary for simplicity usually, but here let's try binary for everything or distinguish)
+                // Actually, let's send header as binary but first byte indicates type? 
+                // Or simpler: First message IS header.
+                
+                dataChannel?.send(headerBuffer)
+                Log.d(TAG, "Sent Header: $headerJson")
+
+                // 3. Send Chunks
+                val buffer = ByteArray(16 * 1024) // 16KB
+                var bytesRead: Int
+                var totalSent = 0L
+                
+                stateFlow.value = TransferState.Transferring(0f)
+
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    if (dataChannel?.state() != DataChannel.State.OPEN) throw Exception("DataChannel closed")
+
+                    val chunk = ByteBuffer.wrap(buffer, 0, bytesRead)
+                    val dataBuffer = DataChannel.Buffer(chunk, true)
+                    
+                    // Flow Control: Wait if buffered amount is too high
+                    while ((dataChannel?.bufferedAmount() ?: 0) > 1024 * 1024) { // 1MB buffer limit
+                        delay(10)
+                    }
+                    
+                    dataChannel?.send(dataBuffer)
+                    totalSent += bytesRead
+                    stateFlow.value = TransferState.Transferring(totalSent.toFloat() / fileSize)
+                }
+
+                stateFlow.value = TransferState.Completed(null)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error receiving data", e)
-            _transferStatus.value = TransferStatus.FAILED
-            cleanupTransfer()
+            Log.e(TAG, "Error sending file", e)
+            stateFlow.value = TransferState.Failed(e.message ?: "Unknown error")
         }
     }
 
-    // ==================== Firestore Helpers ====================
+    private fun handleIncomingMessage(buffer: DataChannel.Buffer, stateFlow: MutableStateFlow<TransferState>) {
+        try {
+            val data = ByteArray(buffer.data.remaining())
+            buffer.data.get(data)
 
-    private fun sendOffer(chatId: String, transferId: String, sdp: String, fileName: String, fileSize: Long, senderId: String, receiverId: String) {
+            if (incomingFile == null) {
+                // First message is Header
+                val headerString = String(data)
+                val json = JSONObject(headerString)
+                incomingFileName = json.getString("name")
+                incomingFileSize = json.getLong("size")
+                
+                incomingFile = File(context.cacheDir, "temp_${System.currentTimeMillis()}_$incomingFileName")
+                receivedBytes = 0
+                Log.d(TAG, "Received Header: $json")
+                stateFlow.value = TransferState.Transferring(0f)
+            } else {
+                // Binary Chunk
+                FileOutputStream(incomingFile, true).use { fos ->
+                    fos.write(data)
+                }
+                receivedBytes += data.size
+                stateFlow.value = TransferState.Transferring(receivedBytes.toFloat() / incomingFileSize)
+
+                if (receivedBytes >= incomingFileSize) {
+                    Log.d(TAG, "File received completely")
+                    // Move to Downloads
+                    val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                    val finalFile = File(downloadsDir, incomingFileName)
+                    
+                    // Handle duplicates
+                    var finalFileUnique = finalFile
+                    var counter = 1
+                    while (finalFileUnique.exists()) {
+                        val name = incomingFileName.substringBeforeLast(".")
+                        val ext = incomingFileName.substringAfterLast(".", "")
+                        finalFileUnique = File(downloadsDir, "$name($counter).$ext")
+                        counter++
+                    }
+
+                    incomingFile?.copyTo(finalFileUnique, overwrite = true)
+                    incomingFile?.delete()
+                    
+                    stateFlow.value = TransferState.Completed(finalFileUnique)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling incoming message", e)
+            stateFlow.value = TransferState.Failed(e.message ?: "Unknown error")
+        }
+    }
+
+    // ==================== Helpers ====================
+
+    private fun getIceServers(): List<PeerConnection.IceServer> {
+        return listOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+             PeerConnection.IceServer.builder("turn:sil-video.ru:3478?transport=udp")
+                .setUsername("melvud").setPassword("berkut14").createIceServer(),
+            PeerConnection.IceServer.builder("turn:sil-video.ru:3478?transport=tcp")
+                .setUsername("melvud").setPassword("berkut14").createIceServer()
+        )
+    }
+
+    private fun createTransferSession(chatId: String, transferId: String, sdp: String, fileName: String, fileSize: Long, senderId: String, receiverId: String) {
         val session = TransferSession(
             transferId = transferId,
             senderId = senderId,
@@ -286,14 +413,6 @@ class FileTransferManager(
         firestore.collection("chats").document(chatId)
             .collection("transfers").document(transferId)
             .set(session)
-            
-        listenForCandidates(chatId, transferId, isSender = true)
-    }
-
-    private fun sendAnswer(chatId: String, transferId: String, sdp: String) {
-        firestore.collection("chats").document(chatId)
-            .collection("transfers").document(transferId)
-            .update("answer", sdp, "status", TransferStatus.CONNECTING)
     }
 
     private fun sendIceCandidate(chatId: String, transferId: String, candidate: IceCandidate, isSender: Boolean) {
@@ -303,6 +422,8 @@ class FileTransferManager(
             .collection("transfers").document(transferId)
             .collection(collection).add(candidateModel)
     }
+
+    private val pendingRemoteCandidates = mutableListOf<IceCandidate>()
 
     private fun listenForCandidates(chatId: String, transferId: String, isSender: Boolean) {
         val collection = if (isSender) "receiverCandidates" else "senderCandidates"
@@ -318,48 +439,45 @@ class FileTransferManager(
                         val sdpMLineIndex = (data["sdpMLineIndex"] as Long).toInt()
                         val sdp = data["sdp"] as String
                         val candidate = IceCandidate(sdpMid, sdpMLineIndex, sdp)
-                        peerConnection?.addIceCandidate(candidate)
+                        
+                        if (peerConnection?.remoteDescription == null) {
+                            Log.d(TAG, "Queuing remote candidate (RemoteDescription is null)")
+                            pendingRemoteCandidates.add(candidate)
+                        } else {
+                            Log.d(TAG, "Adding remote candidate")
+                            peerConnection?.addIceCandidate(candidate)
+                        }
                     }
                 }
             }
     }
 
-    fun cancelTransfer() {
-        _transferStatus.value = TransferStatus.FAILED
-        cleanupTransfer()
-    }
-
-    private fun cleanupTransfer() {
-        val chatId = currentChatId
-        val transferId = activeTransferId
-        
-        // Close WebRTC
-        dataChannel?.close()
-        dataChannel?.dispose()
-        dataChannel = null
-        
-        peerConnection?.close()
-        peerConnection?.dispose()
-        peerConnection = null
-        
-        // Delete Firestore Doc
-        if (chatId != null && transferId != null) {
-            firestore.collection("chats").document(chatId)
-                .collection("transfers").document(transferId)
-                .delete()
-                .addOnSuccessListener { Log.d(TAG, "Transfer doc deleted") }
-                .addOnFailureListener { e -> Log.e(TAG, "Error deleting transfer doc", e) }
+    private fun drainPendingCandidates() {
+        Log.d(TAG, "Draining ${pendingRemoteCandidates.size} pending candidates")
+        pendingRemoteCandidates.forEach { 
+            peerConnection?.addIceCandidate(it) 
         }
-        
-        // Reset State
-        currentChatId = null
-        activeTransferId = null
-        outgoingFile = null
-        incomingFile = null
-        _currentTransferId.value = null
+        pendingRemoteCandidates.clear()
     }
 
-    // ==================== Adapters ====================
+    private fun cleanup(chatId: String?, transferId: String?) {
+        try {
+            dataChannel?.close()
+            dataChannel?.dispose()
+            peerConnection?.close()
+            peerConnection?.dispose()
+            
+            // Delete Firestore Doc
+            if (chatId != null && transferId != null) {
+                firestore.collection("chats").document(chatId)
+                    .collection("transfers").document(transferId)
+                    .delete()
+            }
+            pendingRemoteCandidates.clear()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error cleaning up", e)
+        }
+    }
 
     open class SdpObserverAdapter : SdpObserver {
         override fun onCreateSuccess(p0: SessionDescription?) {}

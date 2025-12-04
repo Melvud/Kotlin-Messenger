@@ -231,6 +231,11 @@ class ChatRepository(
 
     suspend fun uploadFile(uri: Uri, folder: String): String {
         return try {
+            Log.d("ChatRepository", "Uploading file to bucket: ${storage.app.options.storageBucket}")
+            if (storage.app.options.storageBucket.isNullOrBlank()) {
+                throw IllegalStateException("Storage bucket is not configured. Check google-services.json.")
+            }
+            
             val ref = storage.reference.child(folder).child(UUID.randomUUID().toString())
             ref.putFile(uri).await()
             ref.downloadUrl.await().toString()

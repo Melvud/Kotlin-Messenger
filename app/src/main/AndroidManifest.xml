@@ -95,7 +95,7 @@
             android:exported="false" />
 
         <service
-            android:name=".services.FileSenderService"
+            android:name=".push.FileRelayService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

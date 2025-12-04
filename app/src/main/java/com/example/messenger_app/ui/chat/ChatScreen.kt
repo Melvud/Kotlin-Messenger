@@ -6,6 +6,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
@@ -73,6 +75,14 @@ fun ChatScreen(
         }
     )
 
+    // Track Active Chat
+    DisposableEffect(chatId) {
+        com.example.messenger_app.AppState.setActiveChatId(chatId)
+        onDispose {
+            com.example.messenger_app.AppState.setActiveChatId(null)
+        }
+    }
+
     val messages by viewModel.messages.collectAsState()
     val loading by viewModel.loading.collectAsState()
     val error by viewModel.error.collectAsState()
@@ -84,8 +94,32 @@ fun ChatScreen(
     // Media Picker
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            viewModel.uploadMedia(uri, com.example.messenger_app.data.model.MessageType.IMAGE)
+            // User requested P2P for EVERYTHING.
+            viewModel.sendFileP2P(context, uri)
         }
+    }
+
+    // File Picker (P2P)
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            viewModel.sendFileP2P(context, uri)
+        }
+    }
+
+    var showAttachmentSheet by remember { mutableStateOf(false) }
+
+    if (showAttachmentSheet) {
+        AttachmentBottomSheet(
+            onDismiss = { showAttachmentSheet = false },
+            onPickMedia = {
+                showAttachmentSheet = false
+                pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+            },
+            onPickFile = {
+                showAttachmentSheet = false
+                pickFile.launch("*/*")
+            }
+        )
     }
 
     // Audio Recorder
@@ -197,6 +231,13 @@ fun ChatScreen(
                             transferStatus = transferStatus,
                             transferProgress = transferProgress
                         )
+
+                        // Mark as read when displayed
+                        if (!message.isRead && message.senderId != currentUserId) {
+                            LaunchedEffect(message.id) {
+                                viewModel.markAsRead(message.id)
+                            }
+                        }
                     }
                 }
 
@@ -208,7 +249,7 @@ fun ChatScreen(
                         viewModel.sendMessage(text)
                     },
                     onAttach = {
-                        pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        showAttachmentSheet = true
                     },
                     onRecord = { start ->
                         if (start) {
@@ -224,7 +265,7 @@ fun ChatScreen(
                         } else {
                             audioRecorder.stopRecording()
                             audioFile?.let { file ->
-                                viewModel.uploadMedia(android.net.Uri.fromFile(file), com.example.messenger_app.data.model.MessageType.AUDIO)
+                                viewModel.sendFileP2P(context, android.net.Uri.fromFile(file))
                             }
                         }
                     },
@@ -241,6 +282,7 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatInputArea(
     replyToMessage: com.example.messenger_app.data.model.Message?,
@@ -276,7 +318,7 @@ fun ChatInputArea(
                 ) {
                     Text(
                         text = "Ответ: ${replyToMessage.senderName}",
-                        color = Color(0xFF4A90E2),
+                        color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
                     )
@@ -285,13 +327,13 @@ fun ChatInputArea(
                             replyToMessage.encryptedContent 
                         else 
                             "Медиа",
-                        color = Color.Gray,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                         maxLines = 1
                     )
                 }
                 IconButton(onClick = onCancelReply) {
-                    Icon(Icons.Default.Close, contentDescription = "Cancel Reply", tint = Color.Gray)
+                    Icon(Icons.Default.Close, contentDescription = "Cancel Reply", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -303,7 +345,7 @@ fun ChatInputArea(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onAttach) {
-                Icon(Icons.Default.AttachFile, contentDescription = "Attach", tint = Color.Gray)
+                Icon(Icons.Default.AttachFile, contentDescription = "Attach", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             TextField(
@@ -350,7 +392,7 @@ fun ChatInputArea(
                     Icon(
                         imageVector = Icons.Default.Mic,
                         contentDescription = "Record",
-                        tint = if (isRecording) Color.Red else Color.Gray
+                        tint = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             } else {
@@ -364,10 +406,51 @@ fun ChatInputArea(
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Send",
-                        tint = Color(0xFF4A90E2)
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AttachmentBottomSheet(
+    onDismiss: () -> Unit,
+    onPickMedia: () -> Unit,
+    onPickFile: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Прикрепить",
+                fontWeight = FontWeight.Bold,
+                fontSize = 20.sp,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            ListItem(
+                headlineContent = { Text("Фото или Видео") },
+                leadingContent = { 
+                    Icon(Icons.Default.Videocam, contentDescription = null, tint = MaterialTheme.colorScheme.primary) 
+                },
+                modifier = Modifier.clickable { onPickMedia() }
+            )
+            
+            ListItem(
+                headlineContent = { Text("Файл (P2P)") },
+                leadingContent = { 
+                    Icon(Icons.Default.InsertDriveFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary) 
+                },
+                modifier = Modifier.clickable { onPickFile() }
+            )
+            
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }

@@ -199,44 +199,115 @@ fun MessageItem(
                             val fileSize = parts.getOrNull(2)?.toLongOrNull() ?: 0L
                             val sizeMb = String.format("%.2f MB", fileSize / (1024.0 * 1024.0))
 
-                            Column(modifier = Modifier.widthIn(min = 200.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.CloudDownload,
-                                        contentDescription = "P2P File",
-                                        tint = textColor,
-                                        modifier = Modifier.padding(end = 8.dp)
-                                    )
-                                    Column {
-                                        Text(text = fileName, color = textColor, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                                        Text(text = sizeMb, color = textColor.copy(alpha = 0.7f), fontSize = 12.sp)
+                            // Check if file exists locally
+                            val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                            val localFile = java.io.File(downloadsDir, fileName)
+                            val isDownloaded = localFile.exists()
+
+                            if (isDownloaded) {
+                                val mimeType = java.net.URLConnection.guessContentTypeFromName(fileName) ?: ""
+                                when {
+                                    mimeType.startsWith("image") || fileName.endsWith(".jpg") || fileName.endsWith(".png") || fileName.endsWith(".jpeg") -> {
+                                        AsyncImage(
+                                            model = localFile,
+                                            contentDescription = "P2P Image",
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 300.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { showFullScreenImage = true }, // Reuse full screen logic
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        // Hack to reuse existing dialog logic which expects URL string
+                                        if (showFullScreenImage) {
+                                             FullScreenImageDialog(imageUrl = android.net.Uri.fromFile(localFile).toString()) {
+                                                showFullScreenImage = false
+                                            }
+                                        }
+                                    }
+                                    mimeType.startsWith("video") || fileName.endsWith(".mp4") || fileName.endsWith(".mov") -> {
+                                        com.example.messenger_app.ui.components.VideoPlayer(
+                                            uri = android.net.Uri.fromFile(localFile),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(250.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                    }
+                                    else -> {
+                                        // Generic File (Downloaded)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.clickable { 
+                                                // Open file intent
+                                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                                    context,
+                                                    "${context.packageName}.provider",
+                                                    localFile
+                                                )
+                                                intent.setDataAndType(uri, mimeType)
+                                                intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                try {
+                                                    context.startActivity(intent)
+                                                } catch (e: Exception) {
+                                                    android.widget.Toast.makeText(context, "Нечем открыть файл", android.widget.Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Description,
+                                                contentDescription = "File",
+                                                tint = textColor,
+                                                modifier = Modifier.padding(end = 8.dp)
+                                            )
+                                            Column {
+                                                Text(text = fileName, color = textColor, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                                                Text(text = "Скачано • $sizeMb", color = textColor.copy(alpha = 0.7f), fontSize = 12.sp)
+                                            }
+                                        }
                                     }
                                 }
-                                
-                                Spacer(modifier = Modifier.height(8.dp))
+                            } else {
+                                // Not Downloaded / Transferring
+                                Column(modifier = Modifier.widthIn(min = 200.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.CloudDownload,
+                                            contentDescription = "P2P File",
+                                            tint = textColor,
+                                            modifier = Modifier.padding(end = 8.dp)
+                                        )
+                                        Column {
+                                            Text(text = fileName, color = textColor, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                                            Text(text = sizeMb, color = textColor.copy(alpha = 0.7f), fontSize = 12.sp)
+                                        }
+                                    }
+                                    
+                                    Spacer(modifier = Modifier.height(8.dp))
 
-                                val isTransferring = activeTransferId == transferId && (transferStatus == TransferStatus.CONNECTING || transferStatus == TransferStatus.TRANSFERRING)
-                                val isCompleted = activeTransferId == transferId && transferStatus == TransferStatus.COMPLETED
-
-                                if (isTransferring) {
-                                    LinearProgressIndicator(
-                                        progress = { transferProgress },
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                    Text(
-                                        text = if (transferStatus == TransferStatus.CONNECTING) "Подключение..." else "${(transferProgress * 100).toInt()}%",
-                                        color = textColor.copy(alpha = 0.7f),
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.align(Alignment.End)
-                                    )
-                                } else {
-                                    Button(
-                                        onClick = { onDownload(message) },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f)),
-                                        modifier = Modifier.fillMaxWidth().height(36.dp),
-                                        contentPadding = PaddingValues(0.dp)
-                                    ) {
-                                        Text(text = "Скачать (P2P)", color = textColor, fontSize = 12.sp)
+                                    val isTransferring = activeTransferId == transferId && (transferStatus == TransferStatus.CONNECTING || transferStatus == TransferStatus.TRANSFERRING)
+                                    
+                                    if (isTransferring) {
+                                        LinearProgressIndicator(
+                                            progress = { transferProgress },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                        Text(
+                                            text = if (transferStatus == TransferStatus.CONNECTING) "Подключение..." else "${(transferProgress * 100).toInt()}%",
+                                            color = textColor.copy(alpha = 0.7f),
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.align(Alignment.End)
+                                        )
+                                    } else {
+                                        Button(
+                                            onClick = { onDownload(message) },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f)),
+                                            modifier = Modifier.fillMaxWidth().height(36.dp),
+                                            contentPadding = PaddingValues(0.dp)
+                                        ) {
+                                            Text(text = "Скачать (P2P)", color = textColor, fontSize = 12.sp)
+                                        }
                                     }
                                 }
                             }
@@ -372,3 +443,5 @@ private fun formatTimestamp(timestamp: Long): String {
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     return sdf.format(Date(timestamp))
 }
+
+

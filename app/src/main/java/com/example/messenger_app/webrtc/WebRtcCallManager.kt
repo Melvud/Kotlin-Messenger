@@ -181,6 +181,10 @@ object WebRtcCallManager {
         audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
+    fun getPeerConnectionFactory(): PeerConnectionFactory? {
+        return pcFactory
+    }
+
     @Synchronized
     fun startCall(
         callId: String,
