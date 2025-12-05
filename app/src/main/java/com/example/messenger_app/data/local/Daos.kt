@@ -16,6 +16,9 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE chatId = :chatId")
     suspend fun deleteMessages(chatId: String)
+
+    @Query("DELETE FROM messages WHERE chatId = :chatId AND id NOT IN (:currentIds)")
+    suspend fun deleteMessagesNotIn(chatId: String, currentIds: List<String>)
 }
 
 @Dao
@@ -31,4 +34,7 @@ interface ChatDao {
     
     @Query("DELETE FROM chats")
     suspend fun clearChats()
+
+    @Query("DELETE FROM chats WHERE id NOT IN (:currentIds)")
+    suspend fun deleteChatsNotIn(currentIds: List<String>)
 }

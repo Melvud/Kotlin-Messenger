@@ -38,6 +38,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.messenger_app.AppGraph
 import com.example.messenger_app.ui.chat.components.MessageItem
+import com.example.messenger_app.utils.TimeUtils
 import kotlinx.coroutines.launch
 
 private val AccentColor = Color(0xFF3B82F6)
@@ -68,8 +69,10 @@ fun ChatScreen(
                     currentUserName = currentUserName,
                     contactId = contactId,
                     targetUserToken = contactToken,
-                    fileTransferManager = AppGraph.fileTransferManager,
-                    callsRepository = AppGraph.callsRepo
+
+                    callsRepository = AppGraph.callsRepo,
+                    encryptedUploadManager = AppGraph.encryptedUploadManager,
+                    encryptedDownloadManager = AppGraph.encryptedDownloadManager
                 )
             }
         }
@@ -87,24 +90,24 @@ fun ChatScreen(
     val loading by viewModel.loading.collectAsState()
     val error by viewModel.error.collectAsState()
     val replyToMessage by viewModel.replyToMessage.collectAsState()
-    val transferStatus by viewModel.transferStatus.collectAsState()
-    val transferProgress by viewModel.transferProgress.collectAsState()
-    val activeTransferId by viewModel.activeTransferId.collectAsState()
+
 
     // Media Picker
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            // User requested P2P for EVERYTHING.
-            viewModel.sendFileP2P(context, uri)
+        if (uri != null) {
+            // Determine type based on MIME type (simplified)
+            val type = if (context.contentResolver.getType(uri)?.startsWith("video") == true) {
+                com.example.messenger_app.data.model.MessageType.VIDEO
+            } else {
+                com.example.messenger_app.data.model.MessageType.IMAGE
+            }
+            viewModel.uploadMedia(uri, type)
+        }
         }
     }
 
-    // File Picker (P2P)
-    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            viewModel.sendFileP2P(context, uri)
-        }
-    }
+
 
     var showAttachmentSheet by remember { mutableStateOf(false) }
 
@@ -115,10 +118,7 @@ fun ChatScreen(
                 showAttachmentSheet = false
                 pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
-            onPickFile = {
-                showAttachmentSheet = false
-                pickFile.launch("*/*")
-            }
+
         )
     }
 
@@ -142,6 +142,7 @@ fun ChatScreen(
     }
 
     val isOnline by viewModel.isOnline.collectAsState()
+    val lastSeen by viewModel.lastSeen.collectAsState()
     val isOtherUserTyping by viewModel.isOtherUserTyping.collectAsState()
 
     val navigateToCall by viewModel.navigateToCall.collectAsState()
@@ -153,6 +154,10 @@ fun ChatScreen(
         }
     }
     
+    var showDeleteDialog by remember { mutableStateOf<String?>(null) }
+
+    // ... (existing code)
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -167,8 +172,13 @@ fun ChatScreen(
                                 modifier = Modifier.animateContentSize()
                             )
                         } else {
-                            Text(
-                                text = if (isOnline) "в сети" else "не в сети", 
+                            val statusText = if (isOnline) {
+                                "в сети"
+                            } else {
+                                lastSeen?.let { TimeUtils.formatLastSeen(it) } ?: "не в сети"
+                            }
+                             Text(
+                                text = statusText,
                                 fontSize = 12.sp, 
                                 color = if (isOnline) Color(0xFF4CAF50) else Color.Gray
                             )
@@ -205,6 +215,23 @@ fun ChatScreen(
             Column(
                 modifier = Modifier.fillMaxSize()
             ) {
+                // Group Messages
+                val uiItems = remember(messages) {
+                    val items = mutableListOf<ChatUiItem>()
+                    messages.forEachIndexed { index, message ->
+                        items.add(ChatUiItem.MessageItem(message))
+                        
+                        val nextMessage = messages.getOrNull(index + 1)
+                        val isLast = nextMessage == null
+                        val isDateChange = nextMessage != null && !isSameDay(message.timestamp, nextMessage.timestamp)
+                        
+                        if (isLast || isDateChange) {
+                            items.add(ChatUiItem.DateHeader(message.timestamp))
+                        }
+                    }
+                    items
+                }
+
                 // Message List
                 LazyColumn(
                     modifier = Modifier
@@ -213,33 +240,38 @@ fun ChatScreen(
                     reverseLayout = true,
                     contentPadding = PaddingValues(8.dp)
                 ) {
-                    items(messages) { message ->
-                        MessageItem(
-                            message = message,
-                            isMyMessage = message.senderId == currentUserId,
-                            onReply = { viewModel.setReplyToMessage(it) },
-                            onDelete = { viewModel.deleteMessage(it) },
-                            onCopy = { 
-                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                val clip = android.content.ClipData.newPlainText("Message", it)
-                                clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
-                            },
-                            onReaction = { msgId, emoji -> viewModel.addReaction(msgId, emoji) },
-                            onDownload = { viewModel.downloadFile(it) },
-                            activeTransferId = activeTransferId,
-                            transferStatus = transferStatus,
-                            transferProgress = transferProgress
-                        )
 
-                        // Mark as read when displayed
-                        if (!message.isRead && message.senderId != currentUserId) {
-                            LaunchedEffect(message.id) {
-                                viewModel.markAsRead(message.id)
+                    items(uiItems) { item ->
+                        when (item) {
+                            is ChatUiItem.MessageItem -> {
+                                val message = item.message
+                                MessageItem(
+                                    message = message,
+                                    isMyMessage = message.senderId == currentUserId,
+                                    onReply = { viewModel.setReplyToMessage(it) },
+                                    onDelete = { showDeleteDialog = it },
+                                    onCopy = { 
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        val clip = android.content.ClipData.newPlainText("Message", it)
+                                        clipboard.setPrimaryClip(clip)
+                                        Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onReaction = { msgId, emoji -> viewModel.toggleReaction(msgId, emoji) },
+                                    onRetry = { viewModel.retryUpload(it) },
+                                    onDownload = { viewModel.downloadFile(it) },
+                                    onCancel = { viewModel.cancelDownload(it) },
+                                    downloadState = viewModel.downloadStates[message.id]
+                                )
+                                // ...
+                            }
+                            is ChatUiItem.DateHeader -> {
+                                DateHeader(timestamp = item.timestamp)
                             }
                         }
                     }
                 }
+                // ... (Input Area)
+
 
                 // Input Area
                 ChatInputArea(
@@ -265,22 +297,51 @@ fun ChatScreen(
                         } else {
                             audioRecorder.stopRecording()
                             audioFile?.let { file ->
-                                viewModel.sendFileP2P(context, android.net.Uri.fromFile(file))
+                                // P2P Audio removed, need to implement uploadMedia for audio if needed
+                                // For now, just log or toast
+                                Toast.makeText(context, "Audio upload not implemented yet", Toast.LENGTH_SHORT).show()
                             }
                         }
                     },
                     onTyping = { viewModel.onTyping(it) }
                 )
             }
-
+            
             if (loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center)
-                )
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             }
+        }
+
+        if (showDeleteDialog != null) {
+            AlertDialog(
+                onDismissRequest = { showDeleteDialog = null },
+                title = { Text("Удалить сообщение?") },
+                text = { Text("Вы хотите удалить это сообщение?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.deleteMessage(showDeleteDialog!!, deleteForEveryone = false)
+                            showDeleteDialog = null
+                        }
+                    ) {
+                        Text("Удалить у меня")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.deleteMessage(showDeleteDialog!!, deleteForEveryone = true)
+                            showDeleteDialog = null
+                        }
+                    ) {
+                        Text("Удалить у всех", color = Color.Red)
+                    }
+                }
+            )
         }
     }
 }
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -418,8 +479,7 @@ fun ChatInputArea(
 @Composable
 fun AttachmentBottomSheet(
     onDismiss: () -> Unit,
-    onPickMedia: () -> Unit,
-    onPickFile: () -> Unit
+    onPickMedia: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -442,15 +502,57 @@ fun AttachmentBottomSheet(
                 modifier = Modifier.clickable { onPickMedia() }
             )
             
-            ListItem(
-                headlineContent = { Text("Файл (P2P)") },
-                leadingContent = { 
-                    Icon(Icons.Default.InsertDriveFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary) 
-                },
-                modifier = Modifier.clickable { onPickFile() }
-            )
-            
             Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+sealed interface ChatUiItem {
+    data class MessageItem(val message: com.example.messenger_app.data.model.Message) : ChatUiItem
+    data class DateHeader(val timestamp: Long) : ChatUiItem
+}
+
+@Composable
+fun DateHeader(timestamp: Long) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = formatDateHeader(timestamp),
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .background(Color(0xFF4CAF50).copy(alpha = 0.8f), RoundedCornerShape(12.dp)) // Greenish bubble
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+    }
+}
+
+fun isSameDay(ts1: Long, ts2: Long): Boolean {
+    val cal1 = java.util.Calendar.getInstance().apply { timeInMillis = ts1 }
+    val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = ts2 }
+    return cal1.get(java.util.Calendar.YEAR) == cal2.get(java.util.Calendar.YEAR) &&
+            cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR)
+}
+
+fun formatDateHeader(timestamp: Long): String {
+    val now = java.util.Calendar.getInstance()
+    val date = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }
+    
+    return when {
+        now.get(java.util.Calendar.YEAR) == date.get(java.util.Calendar.YEAR) &&
+        now.get(java.util.Calendar.DAY_OF_YEAR) == date.get(java.util.Calendar.DAY_OF_YEAR) -> "Сегодня"
+        
+        now.get(java.util.Calendar.YEAR) == date.get(java.util.Calendar.YEAR) &&
+        now.get(java.util.Calendar.DAY_OF_YEAR) - 1 == date.get(java.util.Calendar.DAY_OF_YEAR) -> "Вчера"
+        
+        else -> {
+            val sdf = java.text.SimpleDateFormat("d MMMM", java.util.Locale("ru"))
+            sdf.format(date.time)
         }
     }
 }

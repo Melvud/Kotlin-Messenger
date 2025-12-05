@@ -3,13 +3,13 @@ package com.example.messenger_app.data.repository
 import android.net.Uri
 import android.util.Log
 import com.example.messenger_app.data.model.Message
+import com.example.messenger_app.data.model.MessageType
 import com.example.messenger_app.data.push.PushRepository
 import com.google.firebase.firestore.FieldValue
 import com.example.messenger_app.utils.SecurityUtils
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
-import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -22,7 +22,6 @@ import android.content.Context
 
 class ChatRepository(
     val firestore: FirebaseFirestore = FirebaseFirestore.getInstance(), // Made public for ChatsListScreen
-    private val storage: FirebaseStorage = FirebaseStorage.getInstance(),
     private val pushRepository: PushRepository,
     private val context: Context,
     private val database: com.example.messenger_app.data.local.AppDatabase
@@ -92,28 +91,44 @@ class ChatRepository(
                 if (snapshot != null) {
                     val messages = snapshot.documents.mapNotNull { doc ->
                         try {
-                            val msg = doc.toObject(Message::class.java)
-                            msg?.let {
-                                com.example.messenger_app.data.local.LocalMessage(
-                                    id = it.id,
-                                    chatId = chatId,
-                                    senderId = it.senderId,
-                                    senderName = it.senderName,
-                                    encryptedContent = it.encryptedContent,
-                                    type = it.type.name,
-                                    timestamp = it.timestamp,
-                                    replyToId = it.replyToId,
-                                    replyPreview = it.replyPreview,
-                                    reactions = it.reactions,
-                                    isRead = it.isRead
-                                )
+                            val message = Message(
+                                id = doc.id,
+                                senderId = doc.getString("senderId") ?: "",
+                                senderName = doc.getString("senderName") ?: "",
+                                encryptedContent = doc.getString("encryptedContent") ?: "",
+                                type = MessageType.valueOf(doc.getString("type") ?: "TEXT"),
+                                timestamp = doc.getLong("timestamp") ?: 0L,
+                                replyToId = doc.getString("replyToId"),
+                                replyPreview = doc.getString("replyPreview"),
+                                reactions = (doc.get("reactions") as? Map<String, String>) ?: emptyMap(),
+                                deletedFor = (doc.get("deletedFor") as? List<String>) ?: emptyList(),
+                                metadata = (doc.get("metadata") as? Map<String, String>) ?: emptyMap()
+                            ).apply {
+                                isRead = doc.getBoolean("isRead") ?: false
                             }
+                            com.example.messenger_app.data.local.LocalMessage(
+                                id = message.id,
+                                chatId = chatId,
+                                senderId = message.senderId,
+                                senderName = message.senderName,
+                                encryptedContent = message.encryptedContent,
+                                type = message.type.name,
+                                timestamp = message.timestamp,
+                                replyToId = message.replyToId,
+                                replyPreview = message.replyPreview,
+                                reactions = message.reactions,
+                                metadata = message.metadata,
+                                isRead = message.isRead
+                            )
                         } catch (e: Exception) {
+                            Log.e("ChatRepository", "Error parsing message from Firestore", e)
                             null
                         }
                     }
                     // Insert into DB
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        val currentIds = messages.map { it.id }
+                        database.messageDao().deleteMessagesNotIn(chatId, currentIds)
                         database.messageDao().insertMessages(messages)
                     }
                 }
@@ -139,8 +154,10 @@ class ChatRepository(
                             replyToId = local.replyToId,
                             replyPreview = local.replyPreview,
                             reactions = local.reactions,
+                            metadata = local.metadata
+                        ).apply {
                             isRead = local.isRead
-                        )
+                        }
                     }
                 }
             )
@@ -170,6 +187,8 @@ class ChatRepository(
                         }
                     }
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        val currentIds = chats.map { it.id }
+                        database.chatDao().deleteChatsNotIn(currentIds)
                         database.chatDao().insertChats(chats)
                     }
                 }
@@ -208,7 +227,7 @@ class ChatRepository(
         }
     }
 
-    suspend fun addReaction(chatId: String, messageId: String, userId: String, emoji: String) {
+    suspend fun addReaction(chatId: String, messageId: String, userId: String, emoji: String?) {
         try {
             val messageRef = firestore.collection("chats")
                 .document(chatId)
@@ -220,30 +239,20 @@ class ChatRepository(
                 val message = snapshot.toObject(Message::class.java)
                 if (message != null) {
                     val newReactions = message.reactions.toMutableMap()
-                    newReactions[userId] = emoji
+                    if (emoji == null) {
+                        newReactions.remove(userId)
+                    } else {
+                        newReactions[userId] = emoji
+                    }
                     transaction.update(messageRef, "reactions", newReactions)
                 }
             }.await()
         } catch (e: Exception) {
-            Log.e("ChatRepository", "Error adding reaction", e)
+            Log.e("ChatRepository", "Error adding/removing reaction", e)
         }
     }
 
-    suspend fun uploadFile(uri: Uri, folder: String): String {
-        return try {
-            Log.d("ChatRepository", "Uploading file to bucket: ${storage.app.options.storageBucket}")
-            if (storage.app.options.storageBucket.isNullOrBlank()) {
-                throw IllegalStateException("Storage bucket is not configured. Check google-services.json.")
-            }
-            
-            val ref = storage.reference.child(folder).child(UUID.randomUUID().toString())
-            ref.putFile(uri).await()
-            ref.downloadUrl.await().toString()
-        } catch (e: Exception) {
-            Log.e("ChatRepository", "Error uploading file", e)
-            throw e
-        }
-    }
+
 
     suspend fun deleteMessage(chatId: String, messageId: String) {
         try {
@@ -256,6 +265,42 @@ class ChatRepository(
         } catch (e: Exception) {
             Log.e("ChatRepository", "Error deleting message", e)
             throw e
+        }
+    }
+
+    suspend fun deleteMessageForEveryone(chatId: String, messageId: String) {
+        try {
+            firestore.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .document(messageId)
+                .delete()
+                .await()
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error deleting message for everyone", e)
+        }
+    }
+
+    suspend fun deleteMessageForMe(chatId: String, messageId: String, userId: String) {
+        try {
+            val messageRef = firestore.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .document(messageId)
+
+            firestore.runTransaction { transaction ->
+                val snapshot = transaction.get(messageRef)
+                val message = snapshot.toObject(Message::class.java)
+                if (message != null) {
+                    val newDeletedFor = message.deletedFor.toMutableList()
+                    if (!newDeletedFor.contains(userId)) {
+                        newDeletedFor.add(userId)
+                        transaction.update(messageRef, "deletedFor", newDeletedFor)
+                    }
+                }
+            }.await()
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error deleting message for me", e)
         }
     }
     suspend fun createChat(participants: List<String>, isGroup: Boolean, groupName: String?): String {

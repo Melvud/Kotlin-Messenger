@@ -15,6 +15,7 @@ data class LocalMessage(
     val replyToId: String?,
     val replyPreview: String?,
     val reactions: Map<String, String>,
+    val metadata: Map<String, String> = emptyMap(),
     val isRead: Boolean
 )
 

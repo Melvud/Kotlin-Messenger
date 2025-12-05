@@ -8,7 +8,8 @@ data class User(
 )
 
 enum class MessageType {
-    TEXT, IMAGE, VIDEO, AUDIO, FILE, FILE_OFFER
+    TEXT, IMAGE, VIDEO, AUDIO, FILE,
+    IMAGE_LINK, VIDEO_LINK, FILE_LINK
 }
 
 data class Message(
@@ -21,10 +22,26 @@ data class Message(
     val replyToId: String? = null, // ID of the message being replied to
     val replyPreview: String? = null, // Decrypted preview of the replied message (for UI)
     val reactions: Map<String, String> = emptyMap(), // userId -> emoji
+    val replyTo: Message? = null,
+    val deletedFor: List<String> = emptyList(),
+    val metadata: Map<String, String> = emptyMap()
+) {
     @get:com.google.firebase.firestore.PropertyName("isRead")
     @set:com.google.firebase.firestore.PropertyName("isRead")
     var isRead: Boolean = false
-)
+
+    @get:com.google.firebase.firestore.Exclude
+    @set:com.google.firebase.firestore.Exclude
+    var isUploading: Boolean = false
+
+    @get:com.google.firebase.firestore.Exclude
+    @set:com.google.firebase.firestore.Exclude
+    var localPath: String? = null
+
+    @get:com.google.firebase.firestore.Exclude
+    @set:com.google.firebase.firestore.Exclude
+    var isError: Boolean = false
+}
 
 data class Chat(
     val id: String = "",

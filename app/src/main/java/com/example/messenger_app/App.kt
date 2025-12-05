@@ -17,9 +17,15 @@ import coil.ImageLoaderFactory
 class App : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
+        instance = this
         FirebaseApp.initializeApp(this)
         AppGraph.init(this)
         com.example.messenger_app.webrtc.WebRtcCallManager.init(this)
+    }
+
+    companion object {
+        lateinit var instance: App
+            private set
     }
 
     override fun newImageLoader(): ImageLoader {
@@ -45,10 +51,18 @@ object AppGraph {
     lateinit var userRepo: UserRepository
         private set
 
-    lateinit var fileTransferManager: com.example.messenger_app.data.p2p.FileTransferManager
-        private set
+
 
     lateinit var callsRepo: com.example.messenger_app.data.CallsRepository
+        private set
+
+    lateinit var litterboxRepo: com.example.messenger_app.data.upload.LitterboxRepository
+        private set
+
+    lateinit var encryptedUploadManager: com.example.messenger_app.data.upload.EncryptedUploadManager
+        private set
+
+    lateinit var encryptedDownloadManager: com.example.messenger_app.data.upload.EncryptedDownloadManager
         private set
 
     @Volatile private var initialized = false
@@ -84,12 +98,16 @@ object AppGraph {
             app,
             com.example.messenger_app.data.local.AppDatabase::class.java,
             "messenger-db"
-        ).build()
+        ).fallbackToDestructiveMigration().build()
         
-        chatRepo = ChatRepository(db, com.google.firebase.storage.FirebaseStorage.getInstance(), pushRepo, app, database)
+        chatRepo = ChatRepository(db, pushRepo, app, database)
         contactsRepo = ContactsRepository(auth, db)
         callsRepo = com.example.messenger_app.data.CallsRepository(auth, db, pushRepo)
-        fileTransferManager = com.example.messenger_app.data.p2p.FileTransferManager(app, db)
+
+
+        litterboxRepo = com.example.messenger_app.data.upload.LitterboxRepository()
+        encryptedUploadManager = com.example.messenger_app.data.upload.EncryptedUploadManager(app, litterboxRepo)
+        encryptedDownloadManager = com.example.messenger_app.data.upload.EncryptedDownloadManager(app)
 
         initialized = true
     }
