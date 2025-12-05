@@ -55,6 +55,7 @@ gradle.xml
 # Google Services (Firebase)
 google-services.json
 service-account.json
+app/src/main/assets/
 
 # Firebase Functions
 functions/node_modules/
