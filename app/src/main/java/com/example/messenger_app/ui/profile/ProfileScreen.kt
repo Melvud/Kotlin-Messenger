@@ -34,7 +34,7 @@ import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
 import com.example.messenger_app.AppGraph
 import com.example.messenger_app.data.UserRepository
-import com.google.firebase.auth.FirebaseAuth
+
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -44,9 +44,9 @@ fun ProfileScreen(
     onBack: () -> Unit,
     onLogout: () -> Unit
 ) {
-    val auth = remember { FirebaseAuth.getInstance() }
-    val user = auth.currentUser
-    val userRepo = AppGraph.userRepo // Assuming AppGraph has userRepo exposed
+    // val auth = remember { FirebaseAuth.getInstance() } // Removed
+    // val user = auth.currentUser // Removed
+    val userRepo = AppGraph.userRepo
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -129,7 +129,7 @@ fun ProfileScreen(
                     )
                 } else {
                     Text(
-                        text = userProfile?.name?.firstOrNull()?.uppercase() ?: user?.displayName?.firstOrNull()?.uppercase() ?: "?",
+                        text = userProfile?.name?.firstOrNull()?.uppercase() ?: "?",
                         fontSize = 48.sp,
                         color = Color.White,
                         fontWeight = FontWeight.Bold
@@ -143,7 +143,7 @@ fun ProfileScreen(
             ProfileItem(
                 icon = Icons.Default.Person,
                 title = "Display Name",
-                value = userProfile?.name ?: user?.displayName ?: "Не указано",
+                value = userProfile?.name ?: "Не указано",
                 onClick = { showNameDialog = true }
             )
 
@@ -157,7 +157,7 @@ fun ProfileScreen(
             ProfileItem(
                 icon = Icons.Default.Email,
                 title = "Email",
-                value = user?.email ?: "Не указано",
+                value = userProfile?.email ?: "Не указано",
                 onClick = { showEmailDialog = true }
             )
 
@@ -191,7 +191,7 @@ fun ProfileScreen(
     if (showNameDialog) {
         EditDialog(
             title = "Изменить имя",
-            initialValue = userProfile?.name ?: user?.displayName ?: "",
+            initialValue = userProfile?.name ?: "",
             onDismiss = { showNameDialog = false },
             onConfirm = { newName ->
                 scope.launch {
@@ -234,7 +234,7 @@ fun ProfileScreen(
     if (showEmailDialog) {
         EditDialog(
             title = "Изменить Email",
-            initialValue = user?.email ?: "",
+            initialValue = userProfile?.email ?: "",
             onDismiss = { showEmailDialog = false },
             onConfirm = { newEmail ->
                 scope.launch {

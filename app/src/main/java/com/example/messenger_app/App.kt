@@ -6,7 +6,7 @@ import com.example.messenger_app.data.*
 import com.example.messenger_app.data.push.PushRepository
 import com.example.messenger_app.data.repository.ChatRepository
 import com.google.firebase.FirebaseApp
-import com.google.firebase.auth.FirebaseAuth
+
 import com.google.firebase.firestore.firestore
 import com.google.firebase.Firebase
 import com.google.firebase.messaging.messaging
@@ -36,6 +36,9 @@ class App : Application(), ImageLoaderFactory {
 }
 
 object AppGraph {
+    lateinit var sessionManager: SessionManager
+        private set
+
     lateinit var fcmTokenManager: FcmTokenManager
         private set
     
@@ -71,10 +74,12 @@ object AppGraph {
     fun init(app: Application) {
         if (initialized) return
         
-        val auth = FirebaseAuth.getInstance()
+        // val auth = FirebaseAuth.getInstance() // Removed
         val db = Firebase.firestore
         val msg = Firebase.messaging
         
+        sessionManager = SessionManager(app)
+
         var deviceId = Settings.Secure.getString(app.contentResolver, Settings.Secure.ANDROID_ID)
         
         // Fallback if ANDROID_ID is null or empty (e.g. emulator or some devices)
@@ -89,8 +94,8 @@ object AppGraph {
 
         val deviceName = android.os.Build.MODEL // User requested Build.MODEL
 
-        fcmTokenManager = FcmTokenManager(auth, db, msg, deviceId, deviceName)
-        userRepo = UserRepository(auth, db, fcmTokenManager)
+        fcmTokenManager = FcmTokenManager(sessionManager, db, msg, deviceId, deviceName)
+        userRepo = UserRepository(sessionManager, db, fcmTokenManager)
         
         pushRepo = PushRepository(app)
         
@@ -101,8 +106,8 @@ object AppGraph {
         ).fallbackToDestructiveMigration().build()
         
         chatRepo = ChatRepository(db, pushRepo, app, database)
-        contactsRepo = ContactsRepository(auth, db)
-        callsRepo = com.example.messenger_app.data.CallsRepository(auth, db, pushRepo)
+        contactsRepo = ContactsRepository(sessionManager, db)
+        callsRepo = com.example.messenger_app.data.CallsRepository(sessionManager, db, pushRepo) // Assuming CallsRepository also needs update
 
 
         litterboxRepo = com.example.messenger_app.data.upload.LitterboxRepository()

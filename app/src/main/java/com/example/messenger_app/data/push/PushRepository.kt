@@ -26,9 +26,14 @@ class PushRepository(private val context: Context) {
     ) {
         withContext(Dispatchers.IO) {
             try {
+                Log.d("PushRepository", "Attempting to send push to $targetToken")
+                
                 // 1. Load service-account.json
                 val inputStream = com.example.messenger_app.utils.ConfigManager.getServiceAccountStream(context)
-                    ?: throw com.example.messenger_app.utils.ConfigMissingException("Ключ конфигурации не найден")
+                if (inputStream == null) {
+                    Log.e("PushRepository", "❌ service-account.json NOT FOUND in assets!")
+                    return@withContext
+                }
 
                 // Parse project_id from JSON
                 val jsonString = inputStream.bufferedReader().use { it.readText() }
@@ -39,12 +44,17 @@ class PushRepository(private val context: Context) {
                 
                 val jsonObject = JSONObject(jsonString)
                 val projectId = jsonObject.getString("project_id")
+                Log.d("PushRepository", "Loaded config for project: $projectId")
 
                 // 2. Get Access Token
-                val googleCredentials = GoogleCredentials.fromStream(inputStreamForCreds)
-                    .createScoped(listOf(SCOPE))
-                googleCredentials.refreshIfExpired()
-                val accessToken = googleCredentials.accessToken.tokenValue
+                // 2. Get Access Token
+                val baseCredentials = com.google.auth.oauth2.ServiceAccountCredentials.fromStream(inputStreamForCreds)
+                Log.d("PushRepository", "Loaded Service Account Email: ${baseCredentials.clientEmail}")
+
+                val scopedCredentials = baseCredentials.createScoped(listOf(SCOPE))
+                scopedCredentials.refreshIfExpired()
+                val accessToken = scopedCredentials.accessToken.tokenValue
+                Log.d("PushRepository", "Access token retrieved successfully")
 
                 // 3. Build JSON Payload
                 val messageJson = JSONObject()
@@ -86,16 +96,16 @@ class PushRepository(private val context: Context) {
 
                 val responseCode = connection.responseCode
                 if (responseCode == 200) {
-                    Log.d("PushRepository", "Push sent successfully")
+                    Log.d("PushRepository", "✅ Push sent successfully")
                 } else {
                     val errorStream = connection.errorStream
                     val errorResponse = errorStream?.bufferedReader()?.use { it.readText() }
-                    Log.e("PushRepository", "Failed to send push: $responseCode, $errorResponse")
+                    Log.e("PushRepository", "❌ Failed to send push: $responseCode, $errorResponse")
                 }
                 connection.disconnect()
 
             } catch (e: Exception) {
-                Log.e("PushRepository", "Error sending push", e)
+                Log.e("PushRepository", "❌ Error sending push", e)
             }
         }
     }

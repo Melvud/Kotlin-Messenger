@@ -1,7 +1,5 @@
 package com.example.messenger_app.data
 
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -11,6 +9,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
+import java.security.MessageDigest
 
 // --------- МОДЕЛИ ---------
 
@@ -53,20 +52,20 @@ private fun DocumentSnapshot.toContact(): Contact? {
 // --------- FCM ТОКЕНЫ ---------
 
 class FcmTokenManager(
-    private val auth: FirebaseAuth,
+    private val sessionManager: SessionManager,
     private val db: FirebaseFirestore,
     private val msg: FirebaseMessaging,
     private val deviceId: String,
     private val deviceName: String
 ) {
     suspend fun registerCurrentToken() {
-        if (auth.currentUser == null) return
+        if (sessionManager.getUid() == null) return
         val token = msg.token.await()
         registerToken(token)
     }
 
     suspend fun registerToken(token: String) {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = sessionManager.getUid() ?: return
         // поддержка мульти-девайсов: users/{uid}/devices/{deviceId}
         val ref = db.collection("users").document(uid)
             .collection("devices").document(deviceId)
@@ -83,19 +82,47 @@ class FcmTokenManager(
 // --------- ПОЛЬЗОВАТЕЛИ ---------
 
 class UserRepository(
-    private val auth: FirebaseAuth,
+    private val sessionManager: SessionManager,
     private val db: FirebaseFirestore,
     private val fcm: FcmTokenManager
 ) {
-    fun currentUser(): FirebaseUser? = auth.currentUser
+    fun currentUserUid(): String? = sessionManager.getUid()
 
-    suspend fun signIn(email: String, password: String) {
-        auth.signInWithEmailAndPassword(email, password).await()
-        ensureUserDoc()
+    private fun hashPassword(password: String): String {
+        val bytes = password.toByteArray()
+        val md = MessageDigest.getInstance("SHA-256")
+        val digest = md.digest(bytes)
+        return digest.fold("") { str, it -> str + "%02x".format(it) }
+    }
+
+    suspend fun signIn(username: String, password: String) {
+        val cleanUsername = username.trim().lowercase().replace(Regex("[^a-z0-9_.]"), "")
+        val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
+
+        val q = db.collection("users")
+            .whereEqualTo("username_lc", finalUsername.lowercase())
+            .limit(1)
+            .get()
+            .await()
+
+        if (q.isEmpty) {
+            throw IllegalArgumentException("User not found")
+        }
+
+        val doc = q.documents.first()
+        val storedHash = doc.getString("passwordHash")
+        
+        if (storedHash != hashPassword(password)) {
+            throw IllegalArgumentException("Invalid password")
+        }
+
+        val uid = doc.id
+        val name = doc.getString("name") ?: finalUsername
+        sessionManager.saveUser(uid, finalUsername, name)
         fcm.registerCurrentToken()
     }
 
-    suspend fun signUp(usernameInput: String, nameInput: String, email: String, password: String) {
+    suspend fun signUp(usernameInput: String, nameInput: String, email: String, password: String) { // Email kept for record but not auth
         // 1. Проверяем уникальность username ДО создания пользователя
         val cleanUsername = usernameInput.trim().lowercase().replace(Regex("[^a-z0-9_.]"), "")
         val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
@@ -104,10 +131,9 @@ class UserRepository(
             throw IllegalArgumentException("Username $finalUsername is already taken")
         }
 
-        auth.createUserWithEmailAndPassword(email, password).await()
-
-        val uid = auth.currentUser!!.uid
+        val uid = java.util.UUID.randomUUID().toString()
         val name = nameInput.ifBlank { "User" }
+        val passwordHash = hashPassword(password)
 
         val doc = db.collection("users").document(uid)
         val body = mapOf(
@@ -116,11 +142,14 @@ class UserRepository(
             "username_lc" to finalUsername.lowercase(),
             "name" to name,
             "email" to email,
+            "passwordHash" to passwordHash,
             "photoUrl" to null,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
         doc.set(body).await()
+        
+        sessionManager.saveUser(uid, finalUsername, name)
         fcm.registerCurrentToken()
     }
 
@@ -135,7 +164,7 @@ class UserRepository(
 
     /** Flow текущего профиля пользователя (реальное время) */
     fun currentUserProfileFlow(): Flow<UserProfile?> = callbackFlow {
-        val uid = auth.currentUser?.uid
+        val uid = sessionManager.getUid()
         if (uid == null) {
             trySend(null)
             close()
@@ -154,7 +183,7 @@ class UserRepository(
     }
 
     suspend fun uploadProfilePicture(uri: android.net.Uri): String {
-        val uid = auth.currentUser?.uid ?: throw IllegalStateException("User not logged in")
+        val uid = sessionManager.getUid() ?: throw IllegalStateException("User not logged in")
         val storageRef = com.google.firebase.storage.FirebaseStorage.getInstance().reference
         val photoRef = storageRef.child("users/$uid/profile_image.jpg")
 
@@ -170,47 +199,6 @@ class UserRepository(
         return downloadUrl
     }
 
-    private suspend fun ensureUserDoc() {
-        val uid = auth.currentUser?.uid ?: return
-        val docRef = db.collection("users").document(uid)
-        val snap = docRef.get().await()
-        if (!snap.exists()) {
-            val email = auth.currentUser?.email ?: ""
-            val base = (auth.currentUser?.displayName ?: email.substringBefore("@"))
-                .lowercase().replace(Regex("[^a-z0-9_\\-.]"), "")
-            val payload = mapOf(
-                "uid" to uid,
-                "username" to base,
-                "username_lc" to base,
-                "name" to base, // для старого UI
-                "handle" to base,
-                "handle_lc" to base,
-                "email" to email,
-                "photoUrl" to auth.currentUser?.photoUrl?.toString(),
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            docRef.set(payload).await()
-        } else {
-            // one-time миграция: если нет username/username_lc — проставим
-            val data = snap.data ?: return
-            val hasUsername = data["username"] != null
-            if (!hasUsername) {
-                val base = (data["name"] as? String)
-                    ?: (data["handle"] as? String)
-                    ?: (auth.currentUser?.email?.substringBefore("@") ?: "user")
-                val norm = base.lowercase().replace(Regex("[^a-z0-9_\\-.]"), "")
-                docRef.update(
-                    mapOf(
-                        "username" to norm,
-                        "username_lc" to norm
-                    )
-                ).await()
-            }
-        }
-    }
-
-
     suspend fun updateProfile(
         newUsername: String? = null,
         newName: String? = null,
@@ -218,8 +206,7 @@ class UserRepository(
         newPassword: String? = null,
         newPhotoUrl: String? = null
     ) {
-        val user = auth.currentUser ?: throw IllegalStateException("User not logged in")
-        val uid = user.uid
+        val uid = sessionManager.getUid() ?: throw IllegalStateException("User not logged in")
 
         // 0. Check username uniqueness if changing
         if (newUsername != null) {
@@ -237,25 +224,6 @@ class UserRepository(
              }
         }
 
-        // 1. Update Firebase Auth Profile (Display Name & Photo)
-        if (newName != null || newPhotoUrl != null) {
-            val profileUpdates = com.google.firebase.auth.UserProfileChangeRequest.Builder().apply {
-                if (newName != null) setDisplayName(newName)
-                if (newPhotoUrl != null) setPhotoUri(android.net.Uri.parse(newPhotoUrl))
-            }.build()
-            user.updateProfile(profileUpdates).await()
-        }
-
-        // 2. Update Email (Auth)
-        if (newEmail != null && newEmail != user.email) {
-            user.updateEmail(newEmail).await()
-        }
-
-        // 3. Update Password (Auth)
-        if (newPassword != null) {
-            user.updatePassword(newPassword).await()
-        }
-
         // 4. Update Firestore User Document
         val updates = mutableMapOf<String, Any>(
             "updatedAt" to FieldValue.serverTimestamp()
@@ -265,15 +233,24 @@ class UserRepository(
              val finalUsername = if (cleanUsername.startsWith("@")) cleanUsername else "@$cleanUsername"
             updates["username"] = finalUsername
             updates["username_lc"] = finalUsername.lowercase()
+            // We need current name to save back if not changing
+            val currentName = sessionManager.getUserName() ?: ""
+            sessionManager.saveUser(uid, finalUsername, currentName) // Update local session
         }
         if (newName != null) {
             updates["name"] = newName
+            // Update local session with new name
+            val currentUsername = sessionManager.getUsername() ?: ""
+            sessionManager.saveUser(uid, currentUsername, newName)
         }
         if (newEmail != null) {
             updates["email"] = newEmail
         }
         if (newPhotoUrl != null) {
             updates["photoUrl"] = newPhotoUrl
+        }
+        if (newPassword != null) {
+            updates["passwordHash"] = hashPassword(newPassword)
         }
 
         if (updates.size > 1) { // more than just timestamp
@@ -282,10 +259,10 @@ class UserRepository(
     }
 
     suspend fun updateOnlineStatus(isOnline: Boolean) {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = sessionManager.getUid() ?: return
         val updates = mapOf(
             "isOnline" to isOnline,
-            "lastActive" to System.currentTimeMillis()
+            "lastSeen" to System.currentTimeMillis()
         )
         try {
             db.collection("users").document(uid).update(updates).await()
@@ -293,15 +270,19 @@ class UserRepository(
             // Ignore errors for status updates
         }
     }
+    
+    fun signOut() {
+        sessionManager.clearUser()
+    }
 }
 
 // --------- КОНТАКТЫ ---------
 
 class ContactsRepository(
-    private val auth: FirebaseAuth,
+    private val sessionManager: SessionManager,
     private val db: FirebaseFirestore
 ) {
-    private fun requireUid(): String = auth.currentUser?.uid
+    private fun requireUid(): String = sessionManager.getUid()
         ?: error("User not authenticated")
 
     /** Живой список контактов текущего пользователя (сортировка по username) */
@@ -337,7 +318,7 @@ class ContactsRepository(
             .endAt("$q\uf8ff")
             .limit(20)
 
-        val current = auth.currentUser?.uid
+        val current = sessionManager.getUid()
         val reg = ref.addSnapshotListener { snap, err ->
             if (err != null) {
                 trySend(emptyList())

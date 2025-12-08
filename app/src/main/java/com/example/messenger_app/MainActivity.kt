@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.livedata.observeAsState
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -30,7 +31,7 @@ import com.example.messenger_app.ui.chat.ChatScreen
 import com.example.messenger_app.ui.profile.ProfileScreen
 import com.example.messenger_app.ui.theme.AppTheme
 import com.example.messenger_app.update.AppUpdateManager
-import com.google.firebase.auth.FirebaseAuth
+
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +48,8 @@ object Routes {
     const val CHAT = "chats/{chatId}/{otherUserId}/{otherUserName}?isGroup={isGroup}"
     const val CALL_ROUTE = "call/{callId}?isVideo={isVideo}&playRingback={playRingback}&otherUsername={otherUsername}"
     const val CALL_DEEPLINK_BASE = "messenger://call/{callId}"
+    const val GROUP_INFO = "group_info/{chatId}/{chatName}"
+    const val ADD_PARTICIPANT = "add_participant"
 
     fun chatRoute(chatId: String?, otherUserId: String, otherUserName: String, isGroup: Boolean = false): String {
         val id = chatId ?: "new"
@@ -57,6 +60,11 @@ object Routes {
     fun callRoute(callId: String, isVideo: Boolean, otherUsername: String, playRingback: Boolean = true): String {
         val encoded = Uri.encode(otherUsername)
         return "call/$callId?isVideo=$isVideo&playRingback=$playRingback&otherUsername=$encoded"
+    }
+
+    fun groupInfoRoute(chatId: String, chatName: String): String {
+        val encodedName = Uri.encode(chatName)
+        return "group_info/$chatId/$encodedName"
     }
 }
 
@@ -106,7 +114,7 @@ class MainActivity : ComponentActivity() {
                 val navController = rememberNavController()
                 val snackbarHostState = remember { SnackbarHostState() }
 
-                val isAuthed = FirebaseAuth.getInstance().currentUser != null
+                val isAuthed = AppGraph.sessionManager.getUid() != null
                 val startDest = if (isAuthed) Routes.CHATS_LIST else Routes.AUTH
 
                 LaunchedEffect(Unit) {
@@ -168,7 +176,7 @@ class MainActivity : ComponentActivity() {
                             ProfileScreen(
                                 onBack = { navController.popBackStack() },
                                 onLogout = {
-                                    FirebaseAuth.getInstance().signOut()
+                                    AppGraph.userRepo.signOut()
                                     // AppGraph.chatRepo.disconnectUser() // Removed
                                     navController.navigate(Routes.AUTH) {
                                         popUpTo(Routes.CHATS_LIST) { inclusive = true }
@@ -207,6 +215,82 @@ class MainActivity : ComponentActivity() {
                                             playRingback = true
                                         )
                                     )
+                                },
+                                onGroupInfoClick = {
+                                    navController.navigate(Routes.groupInfoRoute(chatId, otherUserName))
+                                }
+                            )
+                        }
+
+                        composable(
+                            route = Routes.GROUP_INFO,
+                            arguments = listOf(
+                                navArgument("chatId") { type = NavType.StringType },
+                                navArgument("chatName") { type = NavType.StringType }
+                            )
+                        ) { entry ->
+                            val chatId = entry.arguments?.getString("chatId") ?: return@composable
+                            val chatName = entry.arguments?.getString("chatName") ?: ""
+                            
+                            // We need the SAME ViewModel instance as ChatScreen to share state/logic?
+                            // Or just a new one? ChatViewModel requires many params.
+                            // Ideally, we should scope the ViewModel to the navigation graph or pass necessary data.
+                            // For simplicity, let's create a new ViewModel or use a factory.
+                            // But ChatViewModel needs `contactId`, `currentUserId` etc.
+                            // `GroupInfoScreen` mainly needs `chatId` and `ChatRepository`.
+                            // Let's instantiate a new ChatViewModel. It's a bit heavy but works.
+                            // Wait, `ChatViewModel` init loads messages. We don't need that for GroupInfo.
+                            // Maybe `GroupInfoScreen` should use a separate `GroupInfoViewModel` or just `ChatRepository` directly?
+                            // But `GroupInfoScreen` uses `viewModel.participants`.
+                            // Let's use `ChatViewModel` but we need to provide all params.
+                            
+                            val currentUserId = AppGraph.sessionManager.getUid() ?: ""
+                            val currentUserName = AppGraph.sessionManager.getUserName() ?: "" // Need to fetch or store
+                            
+                            // We can get the ViewModel from a factory or Hilt. Manual DI here is painful.
+                            // Let's assume we can create it.
+                            val viewModel = remember {
+                                com.example.messenger_app.ui.chat.ChatViewModel(
+                                    chatRepository = AppGraph.chatRepo,
+                                    chatId = chatId,
+                                    currentUserId = currentUserId,
+                                    currentUserName = currentUserName, // This might be empty if not stored in session manager properly
+                                    contactId = "group", // Not relevant for group info
+                                    targetUserToken = "",
+                                    callsRepository = AppGraph.callsRepo,
+                                    encryptedUploadManager = AppGraph.encryptedUploadManager,
+                                    encryptedDownloadManager = AppGraph.encryptedDownloadManager
+                                )
+                            }
+                            
+                            // Handle result from AddParticipantScreen
+                            val savedStateHandle = entry.savedStateHandle
+                            val newParticipantId by savedStateHandle.getLiveData<String>("new_participant_id").observeAsState()
+                            
+                            LaunchedEffect(newParticipantId) {
+                                newParticipantId?.let { userId: String ->
+                                    viewModel.addParticipant(userId)
+                                    savedStateHandle.remove<String>("new_participant_id")
+                                }
+                            }
+
+                            com.example.messenger_app.ui.chat.GroupInfoScreen(
+                                chatId = chatId,
+                                chatName = chatName,
+                                viewModel = viewModel,
+                                onBackClick = { navController.popBackStack() },
+                                onAddParticipantClick = {
+                                    navController.navigate(Routes.ADD_PARTICIPANT)
+                                }
+                            )
+                        }
+
+                        composable(Routes.ADD_PARTICIPANT) {
+                            com.example.messenger_app.ui.chat.AddParticipantScreen(
+                                onBack = { navController.popBackStack() },
+                                onUserSelected = { userId ->
+                                    navController.previousBackStackEntry?.savedStateHandle?.set("new_participant_id", userId)
+                                    navController.popBackStack()
                                 }
                             )
                         }
@@ -252,9 +336,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val callsRepo = remember {
-                    CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance(), AppGraph.pushRepo)
-                }
+                // val callsRepo = remember {
+                //    CallsRepository(FirebaseAuth.getInstance(), FirebaseFirestore.getInstance(), AppGraph.pushRepo)
+                // }
+                val callsRepo = AppGraph.callsRepo
 
                 fun handleIntent(i: Intent) {
                     android.util.Log.d("MainActivity", "handleIntent: action=${i.action}, extras=${i.extras?.keySet()}")
@@ -352,7 +437,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    if (FirebaseAuth.getInstance().currentUser != null) {
+                    if (AppGraph.sessionManager.getUid() != null) {
                         CoroutineScope(Dispatchers.IO).launch {
                             runCatching {
                                 AppGraph.fcmTokenManager.registerCurrentToken()
@@ -362,6 +447,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+
             }
         }
     }

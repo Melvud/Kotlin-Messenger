@@ -41,7 +41,7 @@ import com.example.messenger_app.push.NotificationHelper
 import com.example.messenger_app.push.OngoingCallStore
 import com.example.messenger_app.webrtc.WebRtcCallManager
 import com.google.firebase.Timestamp
-import com.google.firebase.auth.FirebaseAuth
+
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -87,7 +87,9 @@ fun CallScreen(
 
     // ✅ ПРИМЕЧАНИЕ: Конструктор CallsRepository использует параметры по умолчанию,
     // поэтому этот код будет работать с исправленной версией CallsRepository
-    val repo = remember { CallsRepository(FirebaseAuth.getInstance(), db, AppGraph.pushRepo) }
+    // ✅ ПРИМЕЧАНИЕ: Конструктор CallsRepository использует параметры по умолчанию,
+    // поэтому этот код будет работать с исправленной версией CallsRepository
+    val repo = AppGraph.callsRepo
 
     var lastProcessedOfferTime by remember { mutableStateOf<Long?>(null) }
     var lastProcessedAnswerTime by remember { mutableStateOf<Long?>(null) }

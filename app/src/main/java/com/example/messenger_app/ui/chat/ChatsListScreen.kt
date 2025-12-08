@@ -20,7 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.messenger_app.AppGraph
-import com.google.firebase.auth.FirebaseAuth
+
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
@@ -33,20 +33,20 @@ fun ChatsListScreen(
     onNewChatClick: () -> Unit,
     onProfileClick: () -> Unit
 ) {
-    val currentUser = FirebaseAuth.getInstance().currentUser
+    val currentUid = AppGraph.sessionManager.getUid()
     var chats by remember { mutableStateOf<List<ChatSummary>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
 
-    LaunchedEffect(currentUser) {
-        if (currentUser != null) {
-            AppGraph.chatRepo.getChatsFlow(currentUser.uid).collect { chatList ->
+    LaunchedEffect(currentUid) {
+        if (currentUid != null) {
+            AppGraph.chatRepo.getChatsFlow(currentUid).collect { chatList ->
                 val summaries = chatList.map { chat ->
                     val participants = chat.participants
                     val isGroup = chat.isGroup
                     var name = chat.name.ifBlank { "Chat" }
                     val lastMessage = chat.lastMessage
                     
-                    val otherUserId = if (isGroup) "" else participants.firstOrNull { it != currentUser.uid } ?: ""
+                    val otherUserId = if (isGroup) "" else participants.firstOrNull { it != currentUid } ?: ""
 
                     if (!isGroup && otherUserId.isNotEmpty()) {
                         if (name == "Chat" || name.isBlank()) {
@@ -58,7 +58,7 @@ fun ChatsListScreen(
                             }
                         }
                     }
-                    ChatSummary(chat.id, name, lastMessage, otherUserId, isGroup, chat.timestamp)
+                    ChatSummary(chat.id, name, lastMessage, otherUserId, isGroup, chat.timestamp?.time ?: 0L)
                 }
                 chats = summaries
                 isLoading = false
@@ -97,8 +97,8 @@ fun ChatsListScreen(
                     onClick = {
                         scope.launch {
                             try {
-                                if (currentUser != null) {
-                                    AppGraph.chatRepo.deleteChatForMe(selectedChat!!.id, currentUser.uid)
+                                if (currentUid != null) {
+                                    AppGraph.chatRepo.deleteChatForMe(selectedChat!!.id, currentUid)
                                     chats = chats.filter { it.id != selectedChat!!.id }
                                 }
                             } catch (e: Exception) {

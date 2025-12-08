@@ -25,7 +25,7 @@ class MessageActionReceiver : BroadcastReceiver() {
             ACTION_MARK_AS_READ -> {
                 scope.launch {
                     try {
-                        AppGraph.chatRepo.markAsRead(cid, "all") // Assuming "all" or specific logic
+                        AppGraph.chatRepo.markAllAsRead(cid)
                         // Ideally we need the message ID, but for now let's just cancel notification
                         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                         notificationManager.cancel(cid.hashCode())
@@ -44,11 +44,11 @@ class MessageActionReceiver : BroadcastReceiver() {
                             // We need a message object. Creating a simple text message.
                             // Note: We don't have senderId/Name here easily without querying repo or passing in intent.
                             // For simplicity, we'll try to use current user from Repo if available.
-                            val currentUser = AppGraph.userRepo.currentUser()
-                            if (currentUser != null) {
+                            val currentUid = AppGraph.sessionManager.getUid()
+                            if (currentUid != null) {
                                 val message = com.example.messenger_app.data.model.Message(
-                                    senderId = currentUser.uid,
-                                    senderName = currentUser.displayName ?: "Me",
+                                    senderId = currentUid,
+                                    senderName = AppGraph.sessionManager.getUsername() ?: "Me",
                                     encryptedContent = replyText,
                                     type = com.example.messenger_app.data.model.MessageType.TEXT,
                                     timestamp = System.currentTimeMillis()

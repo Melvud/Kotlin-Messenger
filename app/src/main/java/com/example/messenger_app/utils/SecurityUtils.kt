@@ -9,8 +9,23 @@ import javax.crypto.spec.SecretKeySpec
 object SecurityUtils {
 
     // 32 bytes = 256 bits
-    // 32 bytes = 256 bits
-    private val SECRET_KEY = com.example.messenger_app.BuildConfig.AES_KEY
+
+    private val SECRET_KEY_SPEC: SecretKeySpec by lazy {
+        val keyHex = com.example.messenger_app.BuildConfig.AES_KEY
+        val keyBytes = hexStringToByteArray(keyHex)
+        SecretKeySpec(keyBytes, "AES")
+    }
+
+    private fun hexStringToByteArray(s: String): ByteArray {
+        val len = s.length
+        val data = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
+            i += 2
+        }
+        return data
+    }
     private const val ALGORITHM = "AES/GCM/NoPadding"
     private const val TAG_LENGTH_BIT = 128
     private const val IV_LENGTH_BYTE = 12
@@ -25,7 +40,7 @@ object SecurityUtils {
             java.security.SecureRandom().nextBytes(iv)
 
             val cipher = Cipher.getInstance(ALGORITHM)
-            val keySpec = SecretKeySpec(SECRET_KEY.toByteArray(StandardCharsets.UTF_8), "AES")
+            val keySpec = SECRET_KEY_SPEC
             val gcmSpec = GCMParameterSpec(TAG_LENGTH_BIT, iv)
             cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmSpec)
 
@@ -59,7 +74,7 @@ object SecurityUtils {
             System.arraycopy(decoded, IV_LENGTH_BYTE, cipherText, 0, cipherTextSize)
 
             val cipher = Cipher.getInstance(ALGORITHM)
-            val keySpec = SecretKeySpec(SECRET_KEY.toByteArray(StandardCharsets.UTF_8), "AES")
+            val keySpec = SECRET_KEY_SPEC
             val gcmSpec = GCMParameterSpec(TAG_LENGTH_BIT, iv)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
 

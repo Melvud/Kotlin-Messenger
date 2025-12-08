@@ -51,12 +51,13 @@ fun ChatScreen(
     contactName: String,
     contactToken: String,
     onBackClick: () -> Unit,
-    onNavigateToCall: (com.example.messenger_app.data.CallInfo) -> Unit
+    onNavigateToCall: (com.example.messenger_app.data.CallInfo) -> Unit,
+    onGroupInfoClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val currentUser = AppGraph.userRepo.currentUser()
-    val currentUserId = currentUser?.uid ?: ""
-    val currentUserName = currentUser?.displayName ?: "Unknown"
+    val currentUserId = AppGraph.sessionManager.getUid() ?: ""
+    // Use Display Name (name) if available, otherwise username
+    val currentUserName = AppGraph.sessionManager.getUserName() ?: AppGraph.sessionManager.getUsername() ?: "Unknown"
 
     // Manual ViewModel Factory
     val viewModel: ChatViewModel = viewModel(
@@ -90,11 +91,13 @@ fun ChatScreen(
     val loading by viewModel.loading.collectAsState()
     val error by viewModel.error.collectAsState()
     val replyToMessage by viewModel.replyToMessage.collectAsState()
+    val isOnline by viewModel.isOnline.collectAsState()
+    val lastSeen by viewModel.lastSeen.collectAsState()
+    val isOtherUserTyping by viewModel.isOtherUserTyping.collectAsState()
 
 
     // Media Picker
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
         if (uri != null) {
             // Determine type based on MIME type (simplified)
             val type = if (context.contentResolver.getType(uri)?.startsWith("video") == true) {
@@ -104,12 +107,10 @@ fun ChatScreen(
             }
             viewModel.uploadMedia(uri, type)
         }
-        }
     }
 
-
-
     var showAttachmentSheet by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf<String?>(null) }
 
     if (showAttachmentSheet) {
         AttachmentBottomSheet(
@@ -118,7 +119,6 @@ fun ChatScreen(
                 showAttachmentSheet = false
                 pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             },
-
         )
     }
 
@@ -141,28 +141,21 @@ fun ChatScreen(
         }
     }
 
-    val isOnline by viewModel.isOnline.collectAsState()
-    val lastSeen by viewModel.lastSeen.collectAsState()
-    val isOtherUserTyping by viewModel.isOtherUserTyping.collectAsState()
-
-    val navigateToCall by viewModel.navigateToCall.collectAsState()
-    
-    LaunchedEffect(navigateToCall) {
-        navigateToCall?.let { callInfo ->
-            onNavigateToCall(callInfo)
-            viewModel.onCallNavigated()
-        }
-    }
-    
-    var showDeleteDialog by remember { mutableStateOf<String?>(null) }
-
-    // ... (existing code)
+    val isGroup by viewModel.isGroup.collectAsState()
+    val participantsCount by viewModel.participantsCount.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
+                    Column(
+                        modifier = Modifier.clickable {
+                            if (isGroup) {
+                                // Navigate to Group Info
+                                onGroupInfoClick()
+                            }
+                        }
+                    ) {
                         Text(text = contactName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         if (isOtherUserTyping) {
                             Text(
@@ -172,7 +165,9 @@ fun ChatScreen(
                                 modifier = Modifier.animateContentSize()
                             )
                         } else {
-                            val statusText = if (isOnline) {
+                            val statusText = if (isGroup) {
+                                "$participantsCount участников"
+                            } else if (isOnline) {
                                 "в сети"
                             } else {
                                 lastSeen?.let { TimeUtils.formatLastSeen(it) } ?: "не в сети"
@@ -180,7 +175,7 @@ fun ChatScreen(
                              Text(
                                 text = statusText,
                                 fontSize = 12.sp, 
-                                color = if (isOnline) Color(0xFF4CAF50) else Color.Gray
+                                color = if (isOnline && !isGroup) Color(0xFF4CAF50) else Color.Gray
                             )
                         }
                     }
@@ -191,37 +186,45 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.initiateCall(isVideo = false) }) {
-                        Icon(Icons.Default.Call, contentDescription = "Voice Call", tint = AccentColor)
+                    if (!isGroup) {
+                        IconButton(onClick = { 
+                            // Start Call
+                            viewModel.initiateCall(isVideo = false, onNavigateToCall)
+                        }) {
+                            Icon(Icons.Default.Call, contentDescription = "Call")
+                        }
+                        IconButton(onClick = { 
+                            // Start Video Call
+                            viewModel.initiateCall(isVideo = true, onNavigateToCall)
+                        }) {
+                            Icon(Icons.Default.Videocam, contentDescription = "Video Call")
+                        }
                     }
-                    IconButton(onClick = { viewModel.initiateCall(isVideo = true) }) {
-                        Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = AccentColor)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
-                    actionIconContentColor = MaterialTheme.colorScheme.onSurface
-                )
+                }
             )
         }
     ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize()
-            ) {
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            Column(modifier = Modifier.fillMaxSize()) {
                 // Group Messages
-                val uiItems = remember(messages) {
+                val uiItems = remember(messages, isGroup) {
                     val items = mutableListOf<ChatUiItem>()
                     messages.forEachIndexed { index, message ->
-                        items.add(ChatUiItem.MessageItem(message))
+                        // In reverse layout (DESCENDING list):
+                        // Index 0 = Newest (Bottom)
+                        // Index N = Oldest (Top)
+                        // We want the name on the VISUALLY TOP message of a sequence.
+                        // That corresponds to the OLDEST message of a sequence (Highest Index).
+                        // So we check if the NEXT message (Index + 1, Older) is different.
                         
                         val nextMessage = messages.getOrNull(index + 1)
+                        val isTopVisualMessage = nextMessage == null || nextMessage.senderId != message.senderId
+                        
+                        // Show sender name if it's a group chat and it's the top visual message
+                        val showName = isGroup && isTopVisualMessage
+
+                        items.add(ChatUiItem.MessageItem(message, showName))
+                        
                         val isLast = nextMessage == null
                         val isDateChange = nextMessage != null && !isSameDay(message.timestamp, nextMessage.timestamp)
                         
@@ -234,9 +237,7 @@ fun ChatScreen(
 
                 // Message List
                 LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
+                    modifier = Modifier.weight(1f),
                     reverseLayout = true,
                     contentPadding = PaddingValues(8.dp)
                 ) {
@@ -248,6 +249,7 @@ fun ChatScreen(
                                 MessageItem(
                                     message = message,
                                     isMyMessage = message.senderId == currentUserId,
+                                    showSenderName = item.showSenderName,
                                     onReply = { viewModel.setReplyToMessage(it) },
                                     onDelete = { showDeleteDialog = it },
                                     onCopy = { 
@@ -262,7 +264,6 @@ fun ChatScreen(
                                     onCancel = { viewModel.cancelDownload(it) },
                                     downloadState = viewModel.downloadStates[message.id]
                                 )
-                                // ...
                             }
                             is ChatUiItem.DateHeader -> {
                                 DateHeader(timestamp = item.timestamp)
@@ -270,7 +271,6 @@ fun ChatScreen(
                         }
                     }
                 }
-                // ... (Input Area)
 
 
                 // Input Area
@@ -508,7 +508,7 @@ fun AttachmentBottomSheet(
 }
 
 sealed interface ChatUiItem {
-    data class MessageItem(val message: com.example.messenger_app.data.model.Message) : ChatUiItem
+    data class MessageItem(val message: com.example.messenger_app.data.model.Message, val showSenderName: Boolean = false) : ChatUiItem
     data class DateHeader(val timestamp: Long) : ChatUiItem
 }
 

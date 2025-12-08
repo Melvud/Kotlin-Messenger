@@ -18,6 +18,7 @@ android {
         val appId = System.getenv("APP_ID") ?: "com.family.messenger.local"
         val appName = System.getenv("APP_NAME") ?: "Family Chat"
         val aesKey = System.getenv("AES_SECRET") ?: "DEFAULT_DEV_KEY_0000000000000000"
+        val turnConfig = project.findProperty("turnConfig") as? String ?: ""
 
         applicationId = appId
         minSdk = 24
@@ -29,20 +30,33 @@ android {
 
         vectorDrawables.useSupportLibrary = true
 
-        resValue("string", "app_name", appName)
+        // resValue("string", "app_name", appName) // Removed: Injected via strings.xml
         buildConfigField("String", "AES_KEY", "\"$aesKey\"")
+        buildConfigField("String", "TURN_CONFIG_JSON", "\"$turnConfig\"")
+        
+        // Optimize APK size
+        ndk {
+            abiFilters += setOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-            isMinifyEnabled = false
+            // Enable minification for debug to reduce size
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
@@ -90,6 +104,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended:1.7.1")
     implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.runtime:runtime-livedata")
 
     // Compose Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -97,7 +112,7 @@ dependencies {
 
     // ==================== Firebase ====================
     implementation(platform("com.google.firebase:firebase-bom:34.2.0"))
-    implementation("com.google.firebase:firebase-auth")
+
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-storage")      // ✅ ДОБАВЛЕНО для чатов
     implementation("com.google.firebase:firebase-messaging")
@@ -136,3 +151,20 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
 }
+// --- AUTO-GENERATED SIGNING CONFIG ---
+android {
+    signingConfigs {
+        create("release") {
+            storeFile = file("release.jks")
+            storePassword = "android"
+            keyAlias = "key0"
+            keyPassword = "android"
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+}
+// -------------------------------------

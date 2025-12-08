@@ -1,7 +1,6 @@
 package com.example.messenger_app.data
 
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessaging
@@ -22,7 +21,7 @@ data class CallInfo(
 
 
 class CallsRepository(
-    private val auth: FirebaseAuth,
+    private val sessionManager: SessionManager,
     private val db: FirebaseFirestore,
     private val pushRepository: PushRepository,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -34,7 +33,7 @@ class CallsRepository(
      * Вся сетевая работа выполняется в фоновой 'scope.launch'.
      */
     fun startCall(calleeUid: String, callType: String): CallInfo {
-        val me = auth.currentUser?.uid ?: error("Not authorized")
+        val me = sessionManager.getUid() ?: error("Not authorized")
 
         // Проверка: нельзя звонить самому себе
         if (me == calleeUid) {
@@ -163,7 +162,7 @@ class CallsRepository(
      * Сообщить другим устройствам того же пользователя, что этот экземпляр принял звонок
      */
     suspend fun hangupOtherDevices(callId: String) {
-        val me = auth.currentUser?.uid ?: return
+        val me = sessionManager.getUid() ?: return
         val currentToken = try {
             FirebaseMessaging.getInstance().token.await()
         } catch (e: Exception) {

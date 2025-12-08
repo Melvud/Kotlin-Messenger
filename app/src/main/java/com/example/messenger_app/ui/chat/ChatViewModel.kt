@@ -35,6 +35,10 @@ class ChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    fun clearError() {
+        _error.value = null
+    }
+
     private val _replyToMessage = MutableStateFlow<Message?>(null)
     val replyToMessage: StateFlow<Message?> = _replyToMessage.asStateFlow()
 
@@ -44,6 +48,9 @@ class ChatViewModel(
     private val _isOnline = MutableStateFlow(false)
     val isOnline: StateFlow<Boolean> = _isOnline.asStateFlow()
 
+    private val _lastSeen = MutableStateFlow<Long?>(null)
+    val lastSeen: StateFlow<Long?> = _lastSeen.asStateFlow()
+
     private val _navigateToCall = MutableStateFlow<com.example.messenger_app.data.CallInfo?>(null)
     val navigateToCall: StateFlow<com.example.messenger_app.data.CallInfo?> = _navigateToCall.asStateFlow()
 
@@ -51,17 +58,23 @@ class ChatViewModel(
         _navigateToCall.value = null
     }
 
-    fun initiateCall(isVideo: Boolean) {
+    fun initiateCall(isVideo: Boolean, onNavigate: (com.example.messenger_app.data.CallInfo) -> Unit) {
         viewModelScope.launch {
             try {
                 val type = if (isVideo) "video" else "audio"
                 val callInfo = callsRepository.startCall(contactId, type)
-                _navigateToCall.value = callInfo
+                onNavigate(callInfo)
             } catch (e: Exception) {
                 _error.value = "Ошибка звонка: ${e.message}"
             }
         }
     }
+
+    private val _isGroup = MutableStateFlow(false)
+    val isGroup: StateFlow<Boolean> = _isGroup.asStateFlow()
+
+    private val _participantsCount = MutableStateFlow(0)
+    val participantsCount: StateFlow<Int> = _participantsCount.asStateFlow()
 
     init {
         loadMessages()
@@ -70,54 +83,31 @@ class ChatViewModel(
         }
         observeUserPresence()
         observeTypingStatus()
+        observeChatMetadata()
     }
 
-    private fun fetchTargetUserToken() {
-        if (contactId.isBlank()) return
-        
-        viewModelScope.launch {
-            try {
-                val devices = chatRepository.firestore.collection("users")
-                    .document(contactId)
-                    .collection("devices")
-                    .orderBy("updatedAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
-                    .limit(1)
-                    .get()
-                    .await()
-                
-                val token = devices.documents.firstOrNull()?.getString("token")
-                if (!token.isNullOrBlank()) {
-                    _targetToken.value = token
+    private fun observeChatMetadata() {
+        chatRepository.firestore.collection("chats").document(chatId)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null && snapshot.exists()) {
+                    _isGroup.value = snapshot.getBoolean("isGroup") ?: false
+                    val participants = snapshot.get("participants") as? List<*>
+                    _participantsCount.value = participants?.size ?: 0
                 }
-            } catch (e: Exception) {
-                Log.e("ChatViewModel", "Error fetching token", e)
             }
-        }
     }
-
-    private val _lastSeen = MutableStateFlow<Long?>(null)
-    val lastSeen: StateFlow<Long?> = _lastSeen.asStateFlow()
 
     private fun observeUserPresence() {
         if (contactId.isBlank()) return
-
-        val docRef = chatRepository.firestore.collection("users").document(contactId)
-        docRef.addSnapshotListener { snapshot, e ->
-            if (e != null) {
-                Log.e("ChatViewModel", "Listen failed.", e)
-                return@addSnapshotListener
+        chatRepository.firestore.collection("users").document(contactId)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null && snapshot.exists()) {
+                    _isOnline.value = snapshot.getBoolean("isOnline") ?: false
+                    _lastSeen.value = snapshot.getLong("lastSeen")
+                }
             }
-
-            if (snapshot != null && snapshot.exists()) {
-                val isOnline = snapshot.getBoolean("isOnline") ?: false
-                _isOnline.value = isOnline
-                val lastSeen = snapshot.getLong("lastSeen")
-                _lastSeen.value = lastSeen
-            } else {
-                _isOnline.value = false
-                _lastSeen.value = null
-            }
-        }
     }
 
     private val _isOtherUserTyping = MutableStateFlow(false)
@@ -129,6 +119,24 @@ class ChatViewModel(
         viewModelScope.launch {
             chatRepository.getTypingStatusFlow(chatId, currentUserId).collect {
                 _isOtherUserTyping.value = it
+            }
+        }
+    }
+
+    private fun fetchTargetUserToken() {
+        viewModelScope.launch {
+            try {
+                val snapshot = chatRepository.firestore.collection("users")
+                    .document(contactId)
+                    .collection("devices")
+                    .get()
+                    .await()
+                val token = snapshot.documents.firstOrNull()?.getString("token")
+                if (token != null) {
+                    _targetToken.value = token
+                }
+            } catch (e: Exception) {
+                // Ignore
             }
         }
     }
@@ -171,13 +179,21 @@ class ChatViewModel(
                     }
                     _messages.value = updatedList
                     _loading.value = false
-                    // Mark unread messages as read and Auto-Download
-                    updatedList.forEach { msg ->
-                        if (!msg.isRead && msg.senderId != currentUserId) {
-                            chatRepository.markAsRead(chatId, msg.id)
+                    
+                    // Mark ALL unread messages as read immediately if we are in the chat
+                    val hasUnread = updatedList.any { !it.isRead && it.senderId != currentUserId }
+                    if (hasUnread) {
+                        viewModelScope.launch {
+                            try {
+                                chatRepository.markAllAsRead(chatId)
+                            } catch (e: Exception) {
+                                Log.e("ChatViewModel", "Error marking all as read", e)
+                            }
                         }
+                    }
                         
-                        // Auto-download if media and not local
+                    // Auto-download if media and not local
+                    updatedList.forEach { msg ->
                         if ((msg.type == MessageType.IMAGE_LINK || msg.type == MessageType.VIDEO_LINK) && msg.localPath == null) {
                              // Check if already downloading or failed? 
                              // For now, simple check.
@@ -499,10 +515,52 @@ class ChatViewModel(
             MessageType.VIDEO, MessageType.VIDEO_LINK -> "Видео"
             MessageType.AUDIO -> "Голосовое сообщение"
             MessageType.FILE, MessageType.FILE_LINK -> "Файл"
+            MessageType.SYSTEM -> message.encryptedContent
         }
     }
 
-    fun clearError() {
-        _error.value = null
+    private val _participants = MutableStateFlow<List<com.example.messenger_app.data.model.User>>(emptyList())
+    val participants: StateFlow<List<com.example.messenger_app.data.model.User>> = _participants.asStateFlow()
+
+    fun loadParticipants() {
+        viewModelScope.launch {
+            try {
+                _participants.value = chatRepository.getChatParticipants(chatId)
+            } catch (e: Exception) {
+                _error.value = "Ошибка загрузки участников: ${e.message}"
+            }
+        }
+    }
+
+    fun updateGroupName(newName: String) {
+        viewModelScope.launch {
+            try {
+                chatRepository.updateGroupName(chatId, newName)
+            } catch (e: Exception) {
+                _error.value = "Ошибка обновления названия: ${e.message}"
+            }
+        }
+    }
+
+    fun addParticipant(userId: String) {
+        viewModelScope.launch {
+            try {
+                chatRepository.addParticipant(chatId, userId, currentUserName)
+                loadParticipants() // Refresh list
+            } catch (e: Exception) {
+                _error.value = "Ошибка добавления участника: ${e.message}"
+            }
+        }
+    }
+
+    fun removeParticipant(userId: String) {
+        viewModelScope.launch {
+            try {
+                chatRepository.removeParticipant(chatId, userId)
+                loadParticipants() // Refresh list
+            } catch (e: Exception) {
+                _error.value = "Ошибка удаления участника: ${e.message}"
+            }
+        }
     }
 }

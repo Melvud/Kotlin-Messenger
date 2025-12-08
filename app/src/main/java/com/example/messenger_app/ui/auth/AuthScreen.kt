@@ -20,7 +20,7 @@ fun AuthScreen(
     onAuthed: () -> Unit
 ) {
     var isLogin by remember { mutableStateOf(true) }
-    var email by remember { mutableStateOf("") }
+    // var email by remember { mutableStateOf("") } // Removed
     var password by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
@@ -40,13 +40,14 @@ fun AuthScreen(
 
                 AnimatedContent(targetState = isLogin, label = "auth-swap") { login ->
                     Column(Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = username, onValueChange = { username = it },
+                            label = { Text("Username (@...)") }, singleLine = true,
+                            shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        
                         if (!login) {
-                            OutlinedTextField(
-                                value = username, onValueChange = { username = it },
-                                label = { Text("Username (@...)") }, singleLine = true,
-                                shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(12.dp))
                             OutlinedTextField(
                                 value = name, onValueChange = { name = it },
                                 label = { Text("Display Name") }, singleLine = true,
@@ -54,13 +55,7 @@ fun AuthScreen(
                             )
                             Spacer(Modifier.height(12.dp))
                         }
-                        OutlinedTextField(
-                            value = email, onValueChange = { email = it },
-                            label = { Text("Email") }, singleLine = true,
-                            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Email),
-                            shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(Modifier.height(12.dp))
+                        
                         OutlinedTextField(
                             value = password, onValueChange = { password = it },
                             label = { Text("Пароль") }, singleLine = true,
@@ -84,12 +79,18 @@ fun AuthScreen(
                         scope.launch {
                             runCatching {
                                 if (isLogin) {
-                                    AppGraph.userRepo.signIn(email.trim(), password)
+                                    if (username.isBlank() || password.isBlank()) {
+                                        throw IllegalArgumentException("Fill all fields")
+                                    }
+                                    AppGraph.userRepo.signIn(username.trim(), password)
                                 } else {
+                                    if (username.isBlank() || password.isBlank()) {
+                                        throw IllegalArgumentException("Fill all fields")
+                                    }
                                     if (!username.startsWith("@")) {
                                         throw IllegalArgumentException("Username must start with @")
                                     }
-                                    AppGraph.userRepo.signUp(username.trim(), name.trim(), email.trim(), password)
+                                    AppGraph.userRepo.signUp(username.trim(), name.trim(), "", password) // Email is empty
                                 }
                             }.onSuccess {
                                 loading = false

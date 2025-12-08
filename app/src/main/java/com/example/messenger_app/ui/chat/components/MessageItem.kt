@@ -45,7 +45,8 @@ fun MessageItem(
     onRetry: (Message) -> Unit = {},
     onDownload: (Message) -> Unit = {},
     onCancel: (String) -> Unit = {},
-    downloadState: EncryptedDownloadManager.DownloadState? = null
+    downloadState: EncryptedDownloadManager.DownloadState? = null,
+    showSenderName: Boolean = false
 ) {
     val alignment = if (isMyMessage) Alignment.CenterEnd else Alignment.CenterStart
     val backgroundColor = if (isMyMessage) Color(0xFFE1FFC7) else Color.White
@@ -90,7 +91,8 @@ fun MessageItem(
         contentAlignment = alignment
     ) {
         Column(
-            horizontalAlignment = if (isMyMessage) Alignment.End else Alignment.Start
+            horizontalAlignment = if (message.type == MessageType.SYSTEM) Alignment.CenterHorizontally else if (isMyMessage) Alignment.End else Alignment.Start,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Box(
                 modifier = Modifier
@@ -100,11 +102,17 @@ fun MessageItem(
                         },
                         onLongClick = { showMenu = true }
                     )
-                    .background(color = backgroundColor, shape = shape)
-                    .padding(8.dp)
-                    .widthIn(max = 280.dp)
+                    .background(
+                        color = if (message.type == MessageType.SYSTEM) Color.Transparent else backgroundColor, 
+                        shape = shape
+                    )
+                    .padding(if (message.type == MessageType.SYSTEM) 0.dp else 8.dp)
+                    .widthIn(max = if (message.type == MessageType.SYSTEM) 1000.dp else 280.dp) // Allow full width for system
             ) {
-                Column {
+                Column(
+                    horizontalAlignment = if (message.type == MessageType.SYSTEM) Alignment.CenterHorizontally else Alignment.Start,
+                    modifier = Modifier.wrapContentWidth() // Changed from fillMaxWidth to wrapContentWidth
+                ) {
                     // Reply Preview
                     message.replyPreview?.let { preview ->
                         Row(
@@ -129,19 +137,64 @@ fun MessageItem(
                         }
                     }
 
+                    // Sender Name (Group Chat)
+                    if (showSenderName) {
+                        Text(
+                            text = message.senderName,
+                            color = Color(kotlin.math.abs(message.senderId.hashCode()) % 0xFFFFFF or 0xFF000000.toInt()).copy(alpha = 1f).let { 
+                                // Ensure readable color (darker)
+                                val hsv = FloatArray(3)
+                                android.graphics.Color.colorToHSV(it.value.toInt(), hsv)
+                                hsv[1] = 1f // Saturation
+                                hsv[2] = 0.8f // Value (Darkness)
+                                Color(android.graphics.Color.HSVToColor(hsv))
+                            },
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
+
                     // Message Content
+                    val isShortText = message.type == MessageType.TEXT && 
+                                    message.encryptedContent.length < 30 && 
+                                    !message.encryptedContent.contains("\n")
+
                     when (message.type) {
                         MessageType.TEXT -> {
-                            Text(
-                                text = message.encryptedContent,
-                                color = textColor,
-                                fontSize = 16.sp
-                            )
+                            val text = message.encryptedContent
+                            
+                            if (isShortText) {
+                                Row(
+                                    verticalAlignment = Alignment.Bottom,
+                                    modifier = Modifier.padding(bottom = 2.dp)
+                                ) {
+                                    Text(
+                                        text = text,
+                                        color = textColor,
+                                        fontSize = 16.sp,
+                                        modifier = Modifier.padding(end = 6.dp)
+                                    )
+                                    MessageTimestamp(
+                                        timestamp = message.timestamp,
+                                        isMyMessage = isMyMessage,
+                                        isRead = message.isRead,
+                                        textColor = textColor
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = text,
+                                    color = textColor,
+                                    fontSize = 16.sp
+                                )
+                            }
                         }
                         MessageType.IMAGE, MessageType.IMAGE_LINK -> {
                             val isLink = message.type == MessageType.IMAGE_LINK
+                            val successFile = (downloadState as? EncryptedDownloadManager.DownloadState.Success)?.file
                             val localFile = if (isLink) {
-                                message.localPath?.let { java.io.File(it) }
+                                message.localPath?.let { java.io.File(it) } ?: successFile
                             } else null
                             
                             val isDownloading = downloadState is EncryptedDownloadManager.DownloadState.Downloading
@@ -278,8 +331,9 @@ fun MessageItem(
                         }
                         MessageType.VIDEO, MessageType.VIDEO_LINK -> {
                             val isLink = message.type == MessageType.VIDEO_LINK
+                            val successFile = (downloadState as? EncryptedDownloadManager.DownloadState.Success)?.file
                             val localFile = if (isLink) {
-                                message.localPath?.let { java.io.File(it) }
+                                message.localPath?.let { java.io.File(it) } ?: successFile
                             } else null
                             
                             val isDownloading = downloadState is EncryptedDownloadManager.DownloadState.Downloading
@@ -421,8 +475,9 @@ fun MessageItem(
                         }
                         MessageType.FILE, MessageType.FILE_LINK -> {
                             val isLink = message.type == MessageType.FILE_LINK
+                            val successFile = (downloadState as? EncryptedDownloadManager.DownloadState.Success)?.file
                             val localFile = if (isLink) {
-                                message.localPath?.let { java.io.File(it) }
+                                message.localPath?.let { java.io.File(it) } ?: successFile
                             } else null
                             val showDownload = isLink && localFile == null
 
@@ -465,39 +520,39 @@ fun MessageItem(
                                 }
                             }
                         }
+                        MessageType.SYSTEM -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = message.encryptedContent, // Should be decrypted/plain text
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier
+                                        .background(Color(0xFF4CAF50), RoundedCornerShape(16.dp)) // Green bubble
+                                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
                     }
 
-
-
-                    // Timestamp & Read Status (Only for non-media, as media has overlay)
+                    // Timestamp & Read Status (Only for non-media and non-system AND not short text)
                     if (message.type != MessageType.IMAGE && message.type != MessageType.IMAGE_LINK && 
-                        message.type != MessageType.VIDEO && message.type != MessageType.VIDEO_LINK) {
+                        message.type != MessageType.VIDEO && message.type != MessageType.VIDEO_LINK &&
+                        message.type != MessageType.SYSTEM && !isShortText) {
                         Row(
                             modifier = Modifier.align(Alignment.End),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = formatTimestamp(message.timestamp),
-                                color = textColor.copy(alpha = 0.7f),
-                                fontSize = 10.sp,
-                                modifier = Modifier.padding(end = 4.dp)
+                            MessageTimestamp(
+                                timestamp = message.timestamp,
+                                isMyMessage = isMyMessage,
+                                isRead = message.isRead,
+                                textColor = textColor
                             )
-
-                            if (isMyMessage && message.isRead) {
-                                Icon(
-                                    imageVector = Icons.Default.DoneAll,
-                                    contentDescription = "Read",
-                                    tint = Color(0xFF3B82F6), // Blue check
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            } else if (isMyMessage) {
-                                 Icon(
-                                    imageVector = Icons.Default.Done,
-                                    contentDescription = "Sent",
-                                    tint = textColor.copy(alpha = 0.7f),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
                         }
                     }
                 }
@@ -511,7 +566,7 @@ fun MessageItem(
                 ) {
                     message.reactions.values.distinct().forEach { emoji ->
                         val count = message.reactions.values.count { it == emoji }
-                        val isMe = message.reactions[com.example.messenger_app.AppGraph.userRepo.currentUser()?.uid] == emoji
+                        val isMe = message.reactions[com.example.messenger_app.AppGraph.sessionManager.getUid()] == emoji
                         Surface(
                             shape = CircleShape,
                             color = if (isMe) Color(0xFFE3F2FD) else Color.White,
@@ -547,7 +602,7 @@ fun MessageItem(
             ) {
                 val emojis = listOf("👍", "❤️", "😂", "😮", "😢", "🔥")
                 emojis.forEach { emoji ->
-                    val isSelected = message.reactions[com.example.messenger_app.AppGraph.userRepo.currentUser()?.uid] == emoji
+                    val isSelected = message.reactions[com.example.messenger_app.AppGraph.sessionManager.getUid()] == emoji
                     Text(
                         text = emoji,
                         fontSize = 24.sp,
@@ -629,3 +684,35 @@ private fun formatTimestamp(timestamp: Long): String {
 }
 
 
+
+@Composable
+private fun MessageTimestamp(
+    timestamp: Long,
+    isMyMessage: Boolean,
+    isRead: Boolean,
+    textColor: Color
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = formatTimestamp(timestamp),
+            color = textColor.copy(alpha = 0.7f),
+            fontSize = 10.sp,
+            modifier = Modifier.padding(end = 4.dp)
+        )
+        if (isMyMessage && isRead) {
+            Icon(
+                imageVector = Icons.Default.DoneAll,
+                contentDescription = "Read",
+                tint = Color(0xFF3B82F6),
+                modifier = Modifier.size(14.dp)
+            )
+        } else if (isMyMessage) {
+            Icon(
+                imageVector = Icons.Default.Done,
+                contentDescription = "Sent",
+                tint = textColor.copy(alpha = 0.7f),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}

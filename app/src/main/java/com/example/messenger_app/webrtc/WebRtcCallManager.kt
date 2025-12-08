@@ -225,15 +225,20 @@ object WebRtcCallManager {
             startCallTimeout(callId)
         }
 
-        val iceServers = listOf(
-            IceServer.builder("stun:sil-video.ru:3478").createIceServer(),
-            IceServer.builder("turn:sil-video.ru:3478?transport=udp")
-                .setUsername("melvud").setPassword("berkut14").createIceServer(),
-            IceServer.builder("turn:sil-video.ru:3478?transport=tcp")
-                .setUsername("melvud").setPassword("berkut14").createIceServer(),
-            IceServer.builder("turns:sil-video.ru:443?transport=tcp")
-                .setUsername("melvud").setPassword("berkut14").createIceServer()
-        )
+        val customTurnConfig = com.example.messenger_app.BuildConfig.TURN_CONFIG_JSON
+        val iceServers = if (customTurnConfig.isNotEmpty()) {
+            parseTurnConfig(customTurnConfig)
+        } else {
+            listOf(
+                IceServer.builder("stun:sil-video.ru:3478").createIceServer(),
+                IceServer.builder("turn:sil-video.ru:3478?transport=udp")
+                    .setUsername("melvud").setPassword("berkut14").createIceServer(),
+                IceServer.builder("turn:sil-video.ru:3478?transport=tcp")
+                    .setUsername("melvud").setPassword("berkut14").createIceServer(),
+                IceServer.builder("turns:sil-video.ru:443?transport=tcp")
+                    .setUsername("melvud").setPassword("berkut14").createIceServer()
+            )
+        }
 
         val rtcConfig = RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -1153,5 +1158,27 @@ object WebRtcCallManager {
         override fun onSetSuccess() {}
         override fun onCreateFailure(error: String?) {}
         override fun onSetFailure(error: String?) {}
+    }
+
+    private fun parseTurnConfig(config: String): List<IceServer> {
+        val servers = mutableListOf<IceServer>()
+        try {
+            val lines = config.split("\n")
+            for (line in lines) {
+                val parts = line.trim().split(" ")
+                if (parts.isNotEmpty() && parts[0].isNotEmpty()) {
+                    val uri = parts[0]
+                    val builder = IceServer.builder(uri)
+                    if (parts.size >= 3) {
+                        builder.setUsername(parts[1])
+                        builder.setPassword(parts[2])
+                    }
+                    servers.add(builder.createIceServer())
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing custom TURN config", e)
+        }
+        return servers
     }
 }

@@ -12,7 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.example.messenger_app.MainActivity
 import com.example.messenger_app.R
-import com.google.firebase.auth.FirebaseAuth
+
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.example.messenger_app.AppGraph
@@ -66,7 +66,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         val toUserId = data["toUserId"] ?: ""
 
         // ИСПРАВЛЕНИЕ: проверяем, что уведомление для нас
-        val currentUserId = FirebaseAuth.getInstance().currentUser?.uid
+        val currentUserId = AppGraph.sessionManager.getUid()
 
         if (currentUserId.isNullOrBlank()) {
             Log.w("FCM", "User not authenticated, ignoring call notification")
@@ -113,8 +113,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             chatId = chatId,
             senderId = senderId,
             senderName = title,
-            messageText = body,
-            messageType = messageType
+            messageText = body
         )
     }
 
@@ -203,18 +202,44 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         chatId: String,
         senderId: String,
         senderName: String,
-        messageText: String,
-        messageType: String
+        messageText: String
     ) {
         // Don't show notification if user is currently in this chat
         if (com.example.messenger_app.AppState.activeChatId.value == chatId) {
-            Log.d("FCM", "User is in chat $chatId, suppressing notification")
             return
         }
 
         ensureMessageChannel()
 
         val notificationId = chatId.hashCode()
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        // Recover existing style or create new
+        val me = Person.Builder().setName("Вы").setKey(AppGraph.sessionManager.getUid() ?: "me").build()
+        val sender = Person.Builder().setName(senderName).setKey(senderId).build()
+        
+        var messagingStyle: NotificationCompat.MessagingStyle? = null
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val activeNotifications = notificationManager.activeNotifications
+            val existing = activeNotifications.find { it.id == notificationId }
+            if (existing != null) {
+                try {
+                    messagingStyle = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(existing.notification)
+                } catch (e: Exception) {
+                    Log.e("FCM", "Failed to extract MessagingStyle", e)
+                }
+            }
+        }
+        
+        if (messagingStyle == null) {
+            messagingStyle = NotificationCompat.MessagingStyle(me)
+                .setConversationTitle(senderName) // For group chats or just title
+        }
+        
+        // Update title if needed (e.g. if it was generic before)
+        messagingStyle?.setConversationTitle(senderName)
+        messagingStyle?.addMessage(messageText, System.currentTimeMillis(), sender)
 
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -228,10 +253,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             this,
             notificationId,
             intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-                        PendingIntent.FLAG_IMMUTABLE
-                    else 0)
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
         // Mark as Read Action
@@ -271,33 +293,11 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
          .setShowsUserInterface(true)
          .build()
 
-        val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-
-        // Person "Me" (current user)
-        val me = Person.Builder()
-            .setName("Вы") // Or get actual name if possible, but "You" is fine for self
-            .setKey(FirebaseAuth.getInstance().currentUser?.uid ?: "me")
-            .build()
-
-        // Person "Sender"
-        val senderPerson = Person.Builder()
-            .setName(senderName)
-            .setKey(senderId)
-            .build()
-
-        val messagingStyle = NotificationCompat.MessagingStyle(me)
-            .setConversationTitle(senderName)
-            .addMessage(
-                messageText,
-                System.currentTimeMillis(),
-                senderPerson
-            )
-
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_notification)
             .setStyle(messagingStyle)
             .setAutoCancel(true)
-            .setSound(defaultSoundUri)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -313,15 +313,16 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             )
             .addAction(replyAction)
 
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(notificationId, notificationBuilder.build())
 
+        // Summary Notification
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             val summaryNotification = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setStyle(
                     NotificationCompat.InboxStyle()
-                        .setBigContentTitle("Новые сообщения")
+                        .setBigContentTitle("Сообщения")
+                        .setSummaryText("Новые сообщения")
                 )
                 .setGroup(MESSAGES_GROUP)
                 .setGroupSummary(true)

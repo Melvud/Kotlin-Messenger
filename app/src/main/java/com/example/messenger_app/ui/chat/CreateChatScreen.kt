@@ -58,7 +58,7 @@ fun CreateChatScreen(
     var isLoading by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
-    val currentUser = AppGraph.userRepo.currentUser()
+    val currentUid = AppGraph.sessionManager.getUid()
     val focusManager = LocalFocusManager.current
 
     // Search Logic
@@ -263,7 +263,7 @@ fun CreateChatScreen(
                                     scope.launch {
                                         isLoading = true
                                         try {
-                                            val participants = listOf(currentUser?.uid ?: "", user.uid).sorted()
+                                            val participants = listOf(currentUid ?: "", user.uid).sorted()
                                             val chatId = AppGraph.chatRepo.createChat(participants, false, null)
                                             onChatCreated(chatId, user.uid, user.name, false)
                                         } catch (e: Exception) {
@@ -386,7 +386,7 @@ fun CreateChatScreen(
                                 scope.launch {
                                     isLoading = true
                                     try {
-                                        val participants = (selectedUsers.map { it.uid } + (currentUser?.uid ?: "")).distinct()
+                                        val participants = (selectedUsers.map { it.uid } + (currentUid ?: "")).distinct()
                                         val chatId = AppGraph.chatRepo.createChat(participants, true, groupName)
                                         onChatCreated(chatId, "group", groupName, true)
                                     } catch (e: Exception) {

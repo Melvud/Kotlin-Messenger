@@ -9,7 +9,8 @@ data class User(
 
 enum class MessageType {
     TEXT, IMAGE, VIDEO, AUDIO, FILE,
-    IMAGE_LINK, VIDEO_LINK, FILE_LINK
+    IMAGE_LINK, VIDEO_LINK, FILE_LINK,
+    SYSTEM
 }
 
 data class Message(
@@ -47,7 +48,11 @@ data class Chat(
     val id: String = "",
     val name: String = "",
     val lastMessage: String = "",
-    val timestamp: Long = 0,
+    @get:com.google.firebase.firestore.PropertyName("createdAt")
+    @set:com.google.firebase.firestore.PropertyName("createdAt")
+    var timestamp: java.util.Date? = null,
     val participants: List<String> = emptyList(),
-    val isGroup: Boolean = false
+    @get:com.google.firebase.firestore.PropertyName("isGroup")
+    @set:com.google.firebase.firestore.PropertyName("isGroup")
+    var isGroup: Boolean = false
 )

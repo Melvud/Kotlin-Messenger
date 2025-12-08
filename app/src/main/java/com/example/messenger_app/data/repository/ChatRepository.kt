@@ -52,27 +52,44 @@ class ChatRepository(
             firestore.collection("chats").document(chatId).set(chatUpdate, SetOptions.merge()).await()
 
             // 4. Fetch Recipient Tokens & Send Push
-            val tokensSnapshot = firestore.collection("users")
-                .document(recipientId)
-                .collection("devices")
-                .get()
-                .await()
+            val recipientIds = if (recipientId.isNotEmpty()) {
+                listOf(recipientId)
+            } else {
+                // Fetch participants from chat for group chats
+                val chatSnapshot = firestore.collection("chats").document(chatId).get().await()
+                val participants = chatSnapshot.get("participants") as? List<String> ?: emptyList()
+                participants.filter { it != message.senderId }
+            }
 
-            val tokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
+            recipientIds.forEach { userId ->
+                try {
+                    val tokensSnapshot = firestore.collection("users")
+                        .document(userId)
+                        .collection("devices")
+                        .get()
+                        .await()
 
-            tokens.forEach { token ->
-                pushRepository.sendDirectPush(
-                    targetToken = token,
-                    title = message.senderName,
-                    body = if (message.type == com.example.messenger_app.data.model.MessageType.IMAGE) "📷 Фото" else "Новое сообщение",
-                    data = mapOf(
-                        "type" to "message_new",
-                        "chatId" to chatId,
-                        "senderId" to message.senderId,
-                        "senderName" to message.senderName,
-                        "messageId" to messageId
-                    )
-                )
+                    val tokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
+
+                    tokens.forEach { token ->
+                        pushRepository.sendDirectPush(
+                            targetToken = token,
+                            title = null, // Data-only message
+                            body = null,
+                            data = mapOf(
+                                "type" to "message_new",
+                                "chatId" to chatId,
+                                "senderId" to message.senderId,
+                                "senderName" to message.senderName,
+                                "messageId" to messageId,
+                                "encryptedContent" to encryptedContent,
+                                "messageType" to message.type.name
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.e("ChatRepository", "Error sending push to user $userId", e)
+                }
             }
 
         } catch (e: Exception) {
@@ -169,9 +186,11 @@ class ChatRepository(
     fun getChatsFlow(userId: String): Flow<List<com.example.messenger_app.data.model.Chat>> = kotlinx.coroutines.flow.flow {
         val listener = firestore.collection("chats")
             .whereArrayContains("participants", userId)
-            .orderBy("timestamp", Query.Direction.DESCENDING)
             .addSnapshotListener { snapshot, error ->
-                if (error != null) return@addSnapshotListener
+                if (error != null) {
+                    Log.e("ChatRepository", "Listen failed.", error)
+                    return@addSnapshotListener
+                }
                 if (snapshot != null) {
                     val chats = snapshot.documents.mapNotNull { doc ->
                         val chat = doc.toObject(com.example.messenger_app.data.model.Chat::class.java)
@@ -180,7 +199,7 @@ class ChatRepository(
                                 id = it.id,
                                 name = it.name,
                                 lastMessage = it.lastMessage,
-                                timestamp = it.timestamp,
+                                timestamp = it.timestamp?.time ?: 0L,
                                 participants = it.participants,
                                 isGroup = it.isGroup
                             )
@@ -202,7 +221,7 @@ class ChatRepository(
                             id = local.id,
                             name = local.name,
                             lastMessage = local.lastMessage,
-                            timestamp = local.timestamp,
+                            timestamp = java.util.Date(local.timestamp),
                             participants = local.participants,
                             isGroup = local.isGroup
                         )
@@ -224,6 +243,25 @@ class ChatRepository(
                 .await()
         } catch (e: Exception) {
             Log.e("ChatRepository", "Error marking as read", e)
+        }
+    }
+
+    suspend fun markAllAsRead(chatId: String) {
+        try {
+            val snapshot = firestore.collection("chats")
+                .document(chatId)
+                .collection("messages")
+                .whereEqualTo("isRead", false)
+                .get()
+                .await()
+
+            val batch = firestore.batch()
+            snapshot.documents.forEach { doc ->
+                batch.update(doc.reference, "isRead", true)
+            }
+            batch.commit().await()
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error marking all as read", e)
         }
     }
 
@@ -395,5 +433,111 @@ class ChatRepository(
             Log.e("ChatRepository", "Error deleting chat for me", e)
             throw e
         }
+    }
+    suspend fun updateGroupName(chatId: String, newName: String) {
+        try {
+            firestore.collection("chats").document(chatId)
+                .update("name", newName)
+                .await()
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error updating group name", e)
+            throw e
+        }
+    }
+
+    suspend fun addParticipant(chatId: String, userId: String, adderName: String) {
+        try {
+            // 1. Get User Name
+            val userSnapshot = firestore.collection("users").document(userId).get().await()
+            val userName = userSnapshot.getString("name") ?: "Пользователь"
+
+            // 2. Add to participants
+            firestore.collection("chats").document(chatId)
+                .update("participants", FieldValue.arrayUnion(userId))
+                .await()
+
+            // 3. Send System Message
+            val systemMessage = Message(
+                id = UUID.randomUUID().toString(),
+                senderId = "system",
+                senderName = "System",
+                encryptedContent = "$adderName пригласил(а) $userName", // Not actually encrypted for system messages? Or should be?
+                // Let's encrypt it to be safe and consistent, but UI needs to know how to display it.
+                // Actually, for system messages, we might want to store plain text if we trust the server/client logic, 
+                // but to keep "encryptedContent" field consistent, we should encrypt it.
+                // However, the prompt implies a specific UI style.
+                type = MessageType.SYSTEM,
+                timestamp = System.currentTimeMillis()
+            )
+            // We need to send this message. sendMessage encrypts it.
+            // But sendMessage requires a recipientId for push. 
+            // For group chats, we should notify ALL participants.
+            // The current sendMessage implementation takes a single recipientId.
+            // We need a sendMessageToGroup or modify sendMessage.
+            
+            // For now, let's manually save the message and handle push separately or reuse logic.
+            // Reusing sendMessage might be tricky if it expects 1 recipient.
+            
+            // Let's implement a simplified sendSystemMessage
+            sendSystemMessage(chatId, systemMessage)
+
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error adding participant", e)
+            throw e
+        }
+    }
+
+    suspend fun removeParticipant(chatId: String, userId: String) {
+        try {
+            firestore.collection("chats").document(chatId)
+                .update("participants", FieldValue.arrayRemove(userId))
+                .await()
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error removing participant", e)
+            throw e
+        }
+    }
+
+    suspend fun getChatParticipants(chatId: String): List<com.example.messenger_app.data.model.User> {
+        try {
+            val chatSnapshot = firestore.collection("chats").document(chatId).get().await()
+            val participantIds = chatSnapshot.get("participants") as? List<String> ?: emptyList()
+            
+            if (participantIds.isEmpty()) return emptyList()
+
+            // Firestore 'in' query supports up to 10 items. If more, we need to batch or fetch individually.
+            // For simplicity, let's fetch individually for now or use chunks.
+            // Or use getAll if we have document references.
+            
+            val tasks = participantIds.map { firestore.collection("users").document(it).get() }
+            val snapshots = com.google.android.gms.tasks.Tasks.await(com.google.android.gms.tasks.Tasks.whenAllSuccess<com.google.firebase.firestore.DocumentSnapshot>(tasks))
+            
+            return snapshots.mapNotNull { doc ->
+                doc.toObject(com.example.messenger_app.data.model.User::class.java)?.copy(id = doc.id)
+            }
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error fetching participants", e)
+            return emptyList()
+        }
+    }
+
+    private suspend fun sendSystemMessage(chatId: String, message: Message) {
+        // Encrypt content
+        val encryptedContent = SecurityUtils.encrypt(message.encryptedContent)
+        val finalMessage = message.copy(encryptedContent = encryptedContent)
+
+        firestore.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .document(finalMessage.id)
+            .set(finalMessage)
+            .await()
+            
+        // Update last message
+         val chatUpdate = mapOf(
+            "lastMessage" to "System Message",
+            "timestamp" to message.timestamp
+        )
+        firestore.collection("chats").document(chatId).set(chatUpdate, SetOptions.merge()).await()
     }
 }

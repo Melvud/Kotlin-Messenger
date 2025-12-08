@@ -17,9 +17,7 @@ object TimeUtils {
         val hours = diff / (1000 * 60 * 60)
 
         return when {
-            minutes < 1 -> "Был(а) только что"
-            minutes < 60 -> "Был(а) $minutes мин. назад"
-            hours < 24 && now.get(Calendar.DAY_OF_YEAR) == date.get(Calendar.DAY_OF_YEAR) -> {
+            now.get(Calendar.DAY_OF_YEAR) == date.get(Calendar.DAY_OF_YEAR) -> {
                 val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
                 "Был(а) сегодня в ${sdf.format(date.time)}"
             }
