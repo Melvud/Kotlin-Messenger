@@ -1,6 +1,7 @@
 <resources>
 
 
+    <string name="app_name">Family Chat</string>
     <string name="channel_incoming_calls_name">Входящие звонки</string>
     <string name="channel_incoming_calls_desc">Уведомления о входящих звонках</string>
     <string name="channel_ongoing_calls_name">Идёт звонок</string>
