@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram Bot Backend (Robokassa Integration)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/antimax
+ExecStart=/root/antimax/venv/bin/python bot/main.py
+Restart=always
+EnvironmentFile=/root/antimax/.env
+
+[Install]
+WantedBy=multi-user.target
+

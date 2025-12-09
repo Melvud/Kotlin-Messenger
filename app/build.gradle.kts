@@ -32,7 +32,8 @@ android {
 
         // resValue("string", "app_name", appName) // Removed: Injected via strings.xml
         buildConfigField("String", "APP_SIGNATURE_SALT", "\"${System.getenv("AES_SECRET") ?: "dev_salt_change_me"}\"")
-        buildConfigField("String", "TURN_CONFIG_JSON", "\"$turnConfig\"")
+        val escapedTurnConfig = turnConfig.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "")
+        buildConfigField("String", "TURN_CONFIG_JSON", "\"$escapedTurnConfig\"")
         
         // Optimize APK size
         ndk {

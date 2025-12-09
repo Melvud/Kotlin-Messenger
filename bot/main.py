@@ -9,7 +9,9 @@ import time
 import random
 import string
 import secrets
-from aiohttp import web
+from fastapi import FastAPI, Request, Response
+import uvicorn
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 
@@ -18,7 +20,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.auth_manager import AuthManager
 from bot.build_manager import BuildManager
+from bot.payments import robokassa
+from bot.billing import service as billing_service
 import firebase_auto
+
+load_dotenv()
 
 # Enable logging
 logging.basicConfig(
@@ -28,7 +34,8 @@ logger = logging.getLogger(__name__)
 
 # Config
 PORT = 8080
-PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8080") 
+PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8080")
+SUBSCRIPTION_PRICE = int(os.getenv("SUBSCRIPTION_PRICE", 1000)) 
 
 # States
 APP_NAME = 1
@@ -48,9 +55,10 @@ auth_flows = {}
 # Menu Keyboard
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("🚀 Создать приложение"), KeyboardButton("📂 Мои приложения")],
-        [KeyboardButton("👤 Профиль"), KeyboardButton("⚙️ Расширенные настройки")],
-        [KeyboardButton("ℹ️ О нас"), KeyboardButton("📞 Контакты")]
+        [KeyboardButton("📖 Инструкция"), KeyboardButton("🚀 Создать приложение")],
+        [KeyboardButton("📂 Мои приложения"), KeyboardButton("👤 Профиль")],
+        [KeyboardButton("⚙️ Расширенные настройки"), KeyboardButton("📞 Контакты")],
+        [KeyboardButton("💳 Купить доступ"), KeyboardButton("❓ FAQ")]
     ],
     resize_keyboard=True
 )
@@ -94,19 +102,58 @@ def tos_callback_factory(bot, chat_id, loop):
     return callback
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    keyboard = [
+        [InlineKeyboardButton("📖 Инструкция", callback_data="instruction_inline")],
+        [InlineKeyboardButton("🚀 Создать приложение", callback_data="create_app_inline")]
+    ]
+    
+    await update.message.reply_text(
     await update.message.reply_text(
         "👋 **Привет! Я бот-конструктор мессенджеров.**\n\n"
-        "Я помогу тебе создать собственный защищенный мессенджер на базе Telegram и Firebase.\n\n"
-        "**Как это работает:**\n"
-        "1. Ты авторизуешься через Google.\n"
-        "2. Указываешь название и иконку.\n"
-        "3. Я настраиваю серверную часть и собираю APK файл.\n"
-        "4. Ты получаешь готовое приложение и ключи шифрования.\n\n"
-        "👇 **Выберите действие в меню:**",
+        "🇷🇺 **Предыстория:**\n"
+        "Я создал это приложение для общения со своей семьей в России. Из-за постоянных блокировок и нестабильной работы привычных мессенджеров, нам нужно было что-то надежное, свое и независимое.\n\n"
+        "☕️ Я решил поделиться этой разработкой с вами за символическую цену в пару чашек кофе, чтобы вы тоже могли обеспечить стабильную связь своим близким.\n\n"
+        "🤔 **Что я умею?**\n"
+        "Я автоматически настраиваю ваши личные сервера, базы данных и собираю готовое Android приложение, которое принадлежит только вам.\n\n"
+        "👇 **С чего начать?**\n"
+        "Если ты здесь впервые, нажми **«📖 Инструкция»** — я расскажу, как это работает.\n"
+        "Если готов — жми **«🚀 Создать приложение»**!",
         parse_mode="Markdown",
-        reply_markup=MAIN_MENU
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    
+    # Ensure ReplyKeyboard is visible
+    await update.message.reply_text("👇 Меню бота:", reply_markup=MAIN_MENU)
+    
     return ConversationHandler.END
+
+async def menu_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle CallbackQuery if present
+    if update.callback_query:
+        await update.callback_query.answer()
+        message_func = update.callback_query.message.reply_text
+    else:
+        message_func = update.message.reply_text
+
+    text = (
+        "📖 **ПОДРОБНАЯ ИНСТРУКЦИЯ**\n\n"
+        "Этот бот создает для вас **личный мессенджер**, который принадлежит только вам. Ниже описаны шаги и важные моменты.\n\n"
+        "1️⃣ **Авторизация через Google**\n"
+        "Мы попросим вас войти в Google аккаунт. Это нужно, чтобы создать **Ваш личный проект в Google Cloud и Firebase**.\n"
+        "— **Зачем?** Мессенджер требует серверную часть (базу данных, пуш-уведомления). Мы не используем общий сервер — мы создаем его лично для вас.\n"
+        "— **Безопасность:** Доступ к базе данных будет **только у вас**. Ни я (разработчик бота), ни другие пользователи не имеют к ней доступа.\n"
+        "— **Разрешения:** Бот запросит права на управление Cloud Platform и Firebase. Это необходимо для автоматической настройки серверов.\n\n"
+        "2️⃣ **Настройка приложения**\n"
+        "Вы придумаете название и загрузите иконку. Бот соберет APK файл специально для вас.\n\n"
+        "3️⃣ **Условия использования**\n"
+        "В процессе сборки Google может попросить принять соглашения (Terms of Service) для использования Firebase. Бот пришлет ссылку — нужно перейти по ней, нажать «Принять», и подтвердить это в боте.\n\n"
+        "4️⃣ **Расширенные настройки (TURN)**\n"
+        "По умолчанию звонки работают через P2P (напрямую) или через мои собственные сервера. В разделе «Расширенные настройки» вы можете подключить **свои TURN сервера**.\n"
+        "— Это нужно для полной независимости и приватности звонков.\n"
+        "— Если вы хотите создать полностью автономный мессенджер, не зависящий ни от кого — это ваш выбор.\n\n"
+        "🚀 **Готовы?** Жмите кнопку **«Создать приложение»** в главном меню!"
+    )
+    await message_func(text, parse_mode="Markdown")
 
 async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -139,9 +186,85 @@ async def unlink_google_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
     await query.edit_message_text(text="✅ Google аккаунт успешно отвязан.")
 
+async def menu_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Generate payment link
+    try:
+        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Подписка на конструктор")
+        
+        keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
+        
+        await update.message.reply_text(
+            f"💳 **Оплата доступа**\n\n"
+            f"Стоимость: **{SUBSCRIPTION_PRICE} ₽**\n"
+            f"Срок: **Навсегда**\n\n"
+            "После оплаты вы сможете создавать неограниченное количество приложений.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error generating payment link: {e}")
+        await update.message.reply_text("⚠️ Ошибка при создании ссылки на оплату. Попробуйте позже.")
+
+async def menu_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    status_text = billing_service.get_subscription_status(user_id)
+    
+    keyboard = []
+    if "Не оплачено" in status_text:
+        keyboard.append([InlineKeyboardButton("💳 Купить подписку", callback_data="buy_subscription")])
+        
+    await update.message.reply_text(
+        f"📊 **Статус подписки**\n\n{status_text}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+    )
+
+async def buy_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Call menu_buy but we need to handle the update correctly
+    # Since menu_buy expects update.message, we need to adapt or just send a new message
+    user_id = update.effective_user.id
+    try:
+        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Подписка на конструктор")
+        keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
+        await query.message.reply_text(
+            f"💳 **Оплата доступа**\n\n"
+            f"Стоимость: **{SUBSCRIPTION_PRICE} ₽**\n"
+            f"Срок: **Навсегда**",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error generating payment link: {e}")
+        await query.message.reply_text("⚠️ Ошибка при создании ссылки на оплату.")
+
+
 async def menu_create_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    
+    # Check payment status
+    if not billing_service.is_user_paid(user_id):
+        await update.message.reply_text(
+            "⛔️ **Доступ запрещен**\n\n"
+            "Для создания приложения необходима активная подписка.\n"
+            "Пожалуйста, оплатите доступ.",
+            parse_mode="Markdown"
+        )
+        # Call menu_buy logic here or just guide user
+        await menu_buy(update, context)
+        return ConversationHandler.END
+
     creds = auth_manager.get_creds(user_id)
+    
+    # Determine reply function
+    if update.callback_query:
+        await update.callback_query.answer()
+        reply_func = update.callback_query.message.reply_text
+    else:
+        reply_func = update.message.reply_text
     
     if not creds:
         # Start Auth Flow
@@ -150,7 +273,7 @@ async def menu_create_app(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         auth_url, flow = auth_manager.get_auth_url(user_id, redirect_uri)
         auth_flows[user_id] = flow
         
-        await update.message.reply_text(
+        await reply_func(
             "🔑 **Требуется авторизация**\n\n"
             "Для создания приложения необходим доступ к Google Cloud (Firebase).\n"
             "Пожалуйста, авторизуйтесь по ссылке ниже:\n\n"
@@ -160,7 +283,7 @@ async def menu_create_app(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return ConversationHandler.END
     
-    await update.message.reply_text(
+    await reply_func(
         "📝 **Название приложения**\n\n"
         "Введите название для вашего мессенджера (например, 'My Family Chat'):",
         reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
@@ -195,18 +318,13 @@ async def menu_my_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if apk_path and os.path.exists(apk_path):
          await update.message.reply_document(document=open(apk_path, 'rb'), caption="📦 Ваш APK файл")
 
-async def menu_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "ℹ️ **О нас**\n\n"
-        "Мы предоставляем сервис для автоматического создания защищенных мессенджеров.\n"
-        "Наш бот использует официальные API Google и Telegram для обеспечения надежности и безопасности."
-    )
 
 async def menu_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("🆘 Написать @drmelvud", url="https://t.me/drmelvud")]]
     await update.message.reply_text(
         "📞 **Контакты**\n\n"
-        "Поддержка: @support_bot\n"
-        "Сайт: example.com"
+        "Если вам нужна помощь или у вас есть вопросы, пишите мне:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def menu_advanced_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,17 +338,83 @@ async def menu_advanced_settings(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def menu_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🍎 Когда на iOS?", callback_data="faq_ios")],
+        [InlineKeyboardButton("🔒 Безопасность", callback_data="faq_security")]
+    ]
+    
+    # Handle CallbackQuery if present (for "back" buttons if we add them later)
+    if update.callback_query:
+        await update.callback_query.answer()
+        reply_func = update.callback_query.message.reply_text
+    else:
+        reply_func = update.message.reply_text
+
+    await reply_func(
+        "❓ **Частые вопросы**\n\n"
+        "Выберите вопрос, чтобы узнать ответ:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def faq_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "faq_ios":
+        text = (
+            "🍎 **Версия для iOS**\n\n"
+            "Версия для iPhone сейчас находится в активной разработке.\n"
+            "К сожалению, разработка под iOS требует больше времени и финансовых вложений (лицензии Apple, оборудование).\n\n"
+            "Мы стараемся выпустить её как можно скорее! 🚀"
+        )
+    elif data == "faq_security":
+        text = (
+            "🔒 **Безопасность**\n\n"
+            "Ваша безопасность — наш приоритет:\n\n"
+            "1️⃣ **Звонки (WebRTC):**\n"
+            "Все звонки защищены сквозным шифрованием (DTLS/SRTP). Никто (даже я) не может их прослушать.\n\n"
+            "2️⃣ **Сообщения:**\n"
+            "База данных находится в **вашем** личном проекте Firebase. Доступ к ней есть только у вас. Мы используем правила безопасности Firestore, чтобы никто посторонний не мог читать вашу переписку."
+        )
+    else:
+        text = "Информация не найдена."
+        
+    # Add a "Back to FAQ" button
+    keyboard = [[InlineKeyboardButton("🔙 Назад к вопросам", callback_data="faq_back")]]
+    
+    await query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def faq_back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Just call menu_faq but we need to handle the update correctly as it comes from a callback
+    await menu_faq(update, context)
+
 async def turn_help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.reply_text(
-        "ℹ️ **Что такое TURN сервера?**\n\n"
-        "TURN (Traversal Using Relays around NAT) — это сервера-реле, которые помогают установить соединение для аудио/видео звонков, когда прямое P2P соединение невозможно (например, из-за строгих фаерволов или NAT).\n\n"
-        "**Зачем свои сервера?**\n"
-        "По умолчанию используются наши общие сервера. Если вы хотите повысить стабильность или приватность, вы можете указать свои.\n\n"
-        "**Где взять?**\n"
-        "Вы можете арендовать VPS и поднять свой coturn сервер, или использовать платные сервисы (Twilio, Xirsys и др.)."
+    
+    text = (
+        "ℹ️ **ЧТО ТАКОЕ TURN СЕРВЕРА?**\n\n"
+        "**Простыми словами:**\n"
+        "Когда вы звоните кому-то, телефон пытается соединиться напрямую. Но если вы за NAT (роутером) или фаерволом, прямое соединение может не пройти. В этом случае нужен посредник — TURN сервер.\n\n"
+        "**Зачем ставить свои?**\n"
+        "1. **Приватность:** Весь трафик звонков будет идти через ВАШ сервер, а не через мои или публичные.\n"
+        "2. **Независимость:** Вы не зависите от сторонних сервисов.\n"
+        "3. **Стабильность:** Вы сами контролируете нагрузку.\n\n"
+        "**Как создать свой TURN сервер? (Пошагово)**\n"
+        "1. Арендуйте любой дешевый VPS (сервер) на Ubuntu.\n"
+        "2. Подключитесь к нему и установите `coturn`: `apt install coturn`.\n"
+        "3. Настройте конфиг `/etc/turnserver.conf` (укажите user, password, realm).\n"
+        "4. Запустите сервер.\n"
+        "5. Введите данные в этом боте: `turn:IP:PORT user password`.\n\n"
+        "Если это звучит сложно — не переживайте, приложение будет работать и без этого (через мои сервера)."
     )
+    
+    keyboard = [[InlineKeyboardButton("🆘 Нужна помощь", url="https://t.me/drmelvud")]]
+    
+    await query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def ask_turn_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -438,7 +622,7 @@ def run_build_thread(chat_id, application, user_id, creds, app_name, family_id, 
             application.bot.send_document(
                 chat_id=chat_id, 
                 document=open(apk_path, 'rb'),
-                caption=f"✅ **Сборка завершена!**\n\n🔑 **Ключ шифрования**: `{aes_key}`\n(Этот ключ закреплен за вами)",
+                caption=f"✅ **Сборка завершена!**,
                 parse_mode="Markdown",
                 reply_markup=MAIN_MENU,
                 read_timeout=300, 
@@ -504,24 +688,82 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Отменено.", reply_markup=MAIN_MENU)
     return ConversationHandler.END
 
-async def oauth_callback(request):
-    params = request.query
+# FastAPI App
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return Response(content=f"<html><body><h1>Messenger Builder Bot</h1><p><a href='https://t.me/msg_creation_bot'>@msg_creation_bot</a></p><p><a href='/legal/offer'>Публичная оферта</a></p><p><a href='/legal/privacy'>Политика конфиденциальности</a></p></body></html>", media_type="text/html")
+
+@app.get("/legal/offer")
+async def legal_offer():
+    try:
+        with open("legal/offer_ru.md", "r") as f:
+            text = f.read()
+        # Simple markdown to HTML conversion for display
+        html = f"<html><body><pre>{text}</pre></body></html>"
+        return Response(content=html, media_type="text/html")
+    except FileNotFoundError:
+        return Response(content="Document not found", status_code=404)
+
+@app.get("/legal/privacy")
+async def legal_privacy():
+    try:
+        with open("legal/privacy_ru.md", "r") as f:
+            text = f.read()
+        html = f"<html><body><pre>{text}</pre></body></html>"
+        return Response(content=html, media_type="text/html")
+    except FileNotFoundError:
+        return Response(content="Document not found", status_code=404)
+
+@app.get("/robokassa/result")
+async def robokassa_result(request: Request):
+    params = request.query_params
+    out_sum = params.get("OutSum")
+    inv_id = params.get("InvId")
+    signature = params.get("SignatureValue")
+    
+    if not out_sum or not inv_id or not signature:
+        return Response(content="Bad Request", status_code=400)
+        
+    try:
+        if robokassa.validate_signature(out_sum, inv_id, signature):
+            user_id = int(inv_id)
+            billing_service.mark_user_paid(user_id)
+            return Response(content=f"OK{inv_id}")
+        else:
+            return Response(content="Bad Signature", status_code=400)
+    except Exception as e:
+        logger.error(f"Payment processing error: {e}")
+        return Response(content="Error", status_code=500)
+
+@app.get("/robokassa/success")
+async def robokassa_success():
+    return Response(content="<html><body><h1>Оплата прошла успешно!</h1><p>Вернитесь в бот <a href='https://t.me/msg_creation_bot'>@msg_creation_bot</a></p></body></html>", media_type="text/html")
+
+@app.get("/robokassa/fail")
+async def robokassa_fail():
+    return Response(content="<html><body><h1>Ошибка оплаты</h1><p>Попробуйте снова в боте <a href='https://t.me/msg_creation_bot'>@msg_creation_bot</a></p></body></html>", media_type="text/html")
+
+@app.get("/oauth2callback")
+async def oauth_callback(request: Request):
+    params = request.query_params
     state = params.get('state')
     code = params.get('code')
     
     if not state or not code:
-        return web.Response(text="Missing state or code", status=400)
+        return Response(content="Missing state or code", status_code=400)
         
     try:
         user_id = int(state)
     except ValueError:
-        return web.Response(text="Invalid state format", status=400)
+        return Response(content="Invalid state format", status_code=400)
     
     if user_id not in auth_flows:
-        return web.Response(text="Invalid state or session expired. Please try again in the bot.", status=400)
+        return Response(content="Invalid state or session expired. Please try again in the bot.", status_code=400)
         
     flow = auth_flows[user_id]
-    bot_app = request.app['bot_app']
+    bot_app = request.app.state.bot_app
     
     try:
         # Finish auth (blocking call, run in executor)
@@ -539,24 +781,19 @@ async def oauth_callback(request):
             reply_markup=MAIN_MENU
         )
             
-        return web.Response(text="Authentication successful! You can close this window and return to the bot.")
+        return Response(content="Authentication successful! You can close this window and return to the bot.")
         
     except Exception as e:
         logger.error(f"Auth failed: {e}")
-        return web.Response(text=f"Authentication failed: {str(e)}", status=500)
+        return Response(content=f"Authentication failed: {str(e)}", status_code=500)
 
 async def post_init(application: Application) -> None:
-    app = web.Application()
-    app['bot_app'] = application
-    app.add_routes([web.get('/oauth2callback', oauth_callback)])
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    
-    logger.info(f"Web server started on port {PORT}")
-    application.bot_data['runner'] = runner
+    app.state.bot_app = application
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    # Run uvicorn in the existing loop
+    asyncio.create_task(server.serve())
+    logger.info(f"FastAPI server started on port {PORT}")
 
 def main():
     token = "8262225773:AAFlvqpndU6PYIOnk7ddQlVg5R5N8bko_-E"
@@ -566,12 +803,17 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.Regex("^📂 Мои приложения$"), menu_my_apps))
     application.add_handler(MessageHandler(filters.Regex("^👤 Профиль$"), menu_profile))
-    application.add_handler(MessageHandler(filters.Regex("^ℹ️ О нас$"), menu_about))
+    
     application.add_handler(MessageHandler(filters.Regex("^📞 Контакты$"), menu_contacts))
+    application.add_handler(MessageHandler(filters.Regex("^📖 Инструкция$"), menu_instruction))
+    application.add_handler(CallbackQueryHandler(menu_instruction, pattern="^instruction_inline$"))
 
     # Conversation for Create App
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🚀 Создать приложение$"), menu_create_app)],
+        entry_points=[
+            MessageHandler(filters.Regex("^🚀 Создать приложение$"), menu_create_app),
+            CallbackQueryHandler(menu_create_app, pattern="^create_app_inline$")
+        ],
         states={
             APP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, app_name)],
             ICON: [
@@ -585,6 +827,11 @@ def main():
     
     application.add_handler(MessageHandler(filters.Regex("^⚙️ Расширенные настройки$"), menu_advanced_settings))
     application.add_handler(CallbackQueryHandler(turn_help_handler, pattern="^turn_help$"))
+
+    # FAQ Handlers
+    application.add_handler(MessageHandler(filters.Regex("^❓ FAQ$"), menu_faq))
+    application.add_handler(CallbackQueryHandler(faq_callback_handler, pattern="^faq_(ios|security)$"))
+    application.add_handler(CallbackQueryHandler(faq_back_handler, pattern="^faq_back$"))
     
     # Conversation for TURN Setup
     turn_conv = ConversationHandler(
@@ -598,6 +845,12 @@ def main():
 
     application.add_handler(CallbackQueryHandler(unlink_google_handler, pattern="^unlink_google$"))
     application.add_handler(CallbackQueryHandler(tos_done_handler, pattern="^tos_done$"))
+
+    # Payment Handlers
+    application.add_handler(CommandHandler("buy", menu_buy))
+    application.add_handler(CommandHandler("status", menu_status))
+    application.add_handler(MessageHandler(filters.Regex("^💳 Купить доступ$"), menu_status))
+    application.add_handler(CallbackQueryHandler(buy_callback_handler, pattern="^buy_subscription$"))
 
     # Run the bot
     application.run_polling()
