@@ -37,6 +37,14 @@ PORT = 8081
 PUBLIC_URL = os.getenv("PUBLIC_URL", os.getenv("BASE_URL", "http://localhost:8081"))
 SUBSCRIPTION_PRICE = int(os.getenv("SUBSCRIPTION_PRICE", 1000)) 
 
+LEGAL_INFO = {
+    "inn": "164813777730",
+    "email": "ivsilan2005@gmail.com",
+    "phone": "+7 917 892-39-56",
+    "ogrnip": "ОГРНИП (заполнить)",
+    "name": "ИП Фамилия И.О. (заполнить)"
+}
+
 # States
 APP_NAME = 1
 ICON = 2
@@ -58,7 +66,8 @@ MAIN_MENU = ReplyKeyboardMarkup(
         [KeyboardButton("📖 Инструкция"), KeyboardButton("🚀 Создать приложение")],
         [KeyboardButton("📂 Мои приложения"), KeyboardButton("👤 Профиль")],
         [KeyboardButton("⚙️ Расширенные настройки"), KeyboardButton("📞 Контакты")],
-        [KeyboardButton("💳 Купить доступ"), KeyboardButton("❓ FAQ")]
+        [KeyboardButton("💳 Купить доступ"), KeyboardButton("❓ FAQ")],
+        [KeyboardButton("ℹ️ О магазине")]
     ],
     resize_keyboard=True
 )
@@ -326,6 +335,27 @@ async def menu_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Если вам нужна помощь или у вас есть вопросы, пишите мне:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def menu_about_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "ℹ️ **О магазине**\n\n"
+        "**Описание товара:** Лицензия на доступ к конструктору приложений.\n"
+        f"**Стоимость:** {SUBSCRIPTION_PRICE} ₽\n\n"
+        "**Контакты:**\n"
+        f"Email: {LEGAL_INFO['email']}\n"
+        f"Телефон: {LEGAL_INFO['phone']}\n\n"
+        "**Юридическая информация:**\n"
+        f"{LEGAL_INFO['name']}\n"
+        f"ИНН: {LEGAL_INFO['inn']}\n"
+        f"ОГРНИП: {LEGAL_INFO['ogrnip']}\n\n"
+        "**Условия доставки:**\n"
+        "Моментальная автоматическая выдача доступа.\n\n"
+        "**Условия возврата:**\n"
+        "Возврат средств за цифровые товары надлежащего качества не производится.\n\n"
+        f"📄 [Публичная оферта]({PUBLIC_URL}/legal/offer)\n"
+        f"🔒 [Политика конфиденциальности]({PUBLIC_URL}/legal/privacy)"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def menu_advanced_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -698,7 +728,8 @@ async def root():
 @app.get("/legal/offer")
 async def legal_offer():
     try:
-        with open("legal/offer_ru.md", "r") as f:
+        file_path = os.path.join(os.path.dirname(__file__), "legal", "offer_ru.md")
+        with open(file_path, "r") as f:
             text = f.read()
         # Simple markdown to HTML conversion for display
         html = f"<html><body><pre>{text}</pre></body></html>"
@@ -709,7 +740,8 @@ async def legal_offer():
 @app.get("/legal/privacy")
 async def legal_privacy():
     try:
-        with open("legal/privacy_ru.md", "r") as f:
+        file_path = os.path.join(os.path.dirname(__file__), "legal", "privacy_ru.md")
+        with open(file_path, "r") as f:
             text = f.read()
         html = f"<html><body><pre>{text}</pre></body></html>"
         return Response(content=html, media_type="text/html")
@@ -805,6 +837,7 @@ def main():
     application.add_handler(MessageHandler(filters.Regex("^👤 Профиль$"), menu_profile))
     
     application.add_handler(MessageHandler(filters.Regex("^📞 Контакты$"), menu_contacts))
+    application.add_handler(MessageHandler(filters.Regex("^ℹ️ О магазине$"), menu_about_shop))
     application.add_handler(MessageHandler(filters.Regex("^📖 Инструкция$"), menu_instruction))
     application.add_handler(CallbackQueryHandler(menu_instruction, pattern="^instruction_inline$"))
 
