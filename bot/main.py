@@ -33,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Config
-PORT = 8080
-PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8080")
+PORT = 8081
+PUBLIC_URL = os.getenv("PUBLIC_URL", os.getenv("BASE_URL", "http://localhost:8081"))
 SUBSCRIPTION_PRICE = int(os.getenv("SUBSCRIPTION_PRICE", 1000)) 
 
 # States
@@ -191,7 +191,7 @@ async def menu_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Generate payment link
     try:
-        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Подписка на конструктор")
+        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Доступ к конструктору (навсегда)")
         
         keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
         
@@ -213,10 +213,10 @@ async def menu_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     if "Не оплачено" in status_text:
-        keyboard.append([InlineKeyboardButton("💳 Купить подписку", callback_data="buy_subscription")])
+        keyboard.append([InlineKeyboardButton("💳 Купить доступ", callback_data="buy_subscription")])
         
     await update.message.reply_text(
-        f"📊 **Статус подписки**\n\n{status_text}",
+        f"📊 **Статус доступа**\n\n{status_text}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
     )
@@ -228,7 +228,7 @@ async def buy_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # Since menu_buy expects update.message, we need to adapt or just send a new message
     user_id = update.effective_user.id
     try:
-        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Подписка на конструктор")
+        payment_url = robokassa.generate_payment_link(user_id, float(SUBSCRIPTION_PRICE), "Доступ к конструктору (навсегда)")
         keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
         await query.message.reply_text(
             f"💳 **Оплата доступа**\n\n"
