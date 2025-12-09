@@ -37,4 +37,7 @@ interface ChatDao {
 
     @Query("DELETE FROM chats WHERE id NOT IN (:currentIds)")
     suspend fun deleteChatsNotIn(currentIds: List<String>)
+
+    @Query("SELECT * FROM chats WHERE id = :chatId LIMIT 1")
+    suspend fun getChatById(chatId: String): LocalChat?
 }

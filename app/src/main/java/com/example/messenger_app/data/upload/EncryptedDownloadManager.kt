@@ -30,11 +30,6 @@ class EncryptedDownloadManager(
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .build()
 
-    private val aesKey: ByteArray by lazy {
-        val keyHex = BuildConfig.AES_KEY
-        hexStringToByteArray(keyHex)
-    }
-
     private fun hexStringToByteArray(s: String): ByteArray {
         val len = s.length
         val data = ByteArray(len / 2)
@@ -53,8 +48,20 @@ class EncryptedDownloadManager(
         data class Error(val message: String) : DownloadState()
     }
 
-    fun downloadMedia(url: String, mimeType: String, fileName: String? = null): kotlinx.coroutines.flow.Flow<DownloadState> = kotlinx.coroutines.flow.flow {
+    fun downloadMedia(urlComposite: String, mimeType: String, fileName: String? = null): kotlinx.coroutines.flow.Flow<DownloadState> = kotlinx.coroutines.flow.flow {
         emit(DownloadState.Downloading(0f))
+        
+        // Parse URL|KEY|IV
+        val parts = urlComposite.split("|")
+        if (parts.size < 3) {
+            emit(DownloadState.Error("Invalid encrypted URL format"))
+            return@flow
+        }
+        
+        val url = parts[0]
+        val keyHex = parts[1]
+        val ivHex = parts[2]
+        
         android.util.Log.d("EncDownloadMgr", "Starting download: $url, mimeType: $mimeType")
         
         val tempEncFile = File(context.cacheDir, "temp_download_${System.currentTimeMillis()}.enc")
@@ -92,18 +99,12 @@ class EncryptedDownloadManager(
             
             try {
                 java.io.FileInputStream(tempEncFile).use { fileIn ->
-                    // Read IV (first 12 bytes)
-                    val iv = ByteArray(12)
-                    var totalRead = 0
-                    while (totalRead < 12) {
-                        val read = fileIn.read(iv, totalRead, 12 - totalRead)
-                        if (read == -1) break
-                        totalRead += read
-                    }
-                    if (totalRead != 12) throw IOException("Invalid file format: missing or incomplete IV")
+                    // IV is passed in the string, NOT in the file header anymore
+                    val iv = hexStringToByteArray(ivHex)
+                    val keyBytes = hexStringToByteArray(keyHex)
 
                     // Setup Decryption
-                    val secretKey = SecretKeySpec(aesKey, "AES")
+                    val secretKey = SecretKeySpec(keyBytes, "AES")
                     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                     val spec = GCMParameterSpec(128, iv)
                     cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
@@ -133,13 +134,9 @@ class EncryptedDownloadManager(
         }
     }.flowOn(Dispatchers.IO)
 
-    fun getLocalFile(url: String, mimeType: String, fileName: String?): File? {
-        // This is a heuristic check. Since we don't have a database of downloaded files mapping URL -> Path,
-        // we can try to guess based on filename if provided, or we might need to rely on the caller tracking this.
-        // For now, let's assume the caller might pass the expected filename.
-        // If not, we can't easily check if *this specific URL* was downloaded without a DB.
-        // BUT, for the chat, we can check if the file exists in our cache directory with a hash of the URL?
-        // Let's implement a simple hash-based filename strategy for caching if no filename is provided.
+    fun getLocalFile(urlComposite: String, mimeType: String, fileName: String?): File? {
+        // Parse URL from composite string if present
+        val url = if (urlComposite.contains("|")) urlComposite.split("|")[0] else urlComposite
         
         val name = fileName ?: "${url.hashCode()}.${getExtension(mimeType)}"
         val file = File(getOutputDir(mimeType), name)
@@ -147,7 +144,8 @@ class EncryptedDownloadManager(
     }
     
     // Helper to generate a consistent local filename for a given URL/Message
-    fun generateLocalFileName(url: String, mimeType: String): String {
+    fun generateLocalFileName(urlComposite: String, mimeType: String): String {
+        val url = if (urlComposite.contains("|")) urlComposite.split("|")[0] else urlComposite
         return "${url.hashCode()}.${getExtension(mimeType)}"
     }
 

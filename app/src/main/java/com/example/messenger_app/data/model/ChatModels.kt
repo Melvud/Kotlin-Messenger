@@ -4,7 +4,8 @@ data class User(
     val id: String = "",
     val name: String = "",
     val avatarUrl: String = "",
-    val token: String = ""
+    val token: String = "",
+    val publicKey: String? = null
 )
 
 enum class MessageType {

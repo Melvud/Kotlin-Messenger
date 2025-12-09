@@ -99,12 +99,13 @@ object NotificationHelper {
 
         // Полноэкранный интент: просто открываем приложение с нужными deeplink_*,
         // дальше MainActivity сам навигирует на CallScreen (роль "callee").
-        val fullScreen = Intent(ctx, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("deeplink_callId", callId)
-            putExtra("deeplink_isVideo", isVideo)
-            putExtra("deeplink_username", username)
-        }
+        val fullScreen = android.content.Intent(ctx, MainActivity::class.java)
+        fullScreen.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val extras = android.os.Bundle()
+        extras.putString("deeplink_callId", callId)
+        extras.putBoolean("deeplink_isVideo", isVideo)
+        extras.putString("deeplink_username", username)
+        fullScreen.putExtras(extras)
         val fullScreenPi = PendingIntent.getActivity(
             ctx,
             (notificationIdFor(callId) shl 1),

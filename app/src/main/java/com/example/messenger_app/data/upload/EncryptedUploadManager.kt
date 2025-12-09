@@ -19,20 +19,9 @@ class EncryptedUploadManager(
     private val litterboxRepository: LitterboxRepository
 ) {
 
-    private val aesKey: ByteArray by lazy {
-        val keyHex = BuildConfig.AES_KEY
-        hexStringToByteArray(keyHex)
-    }
-
-    private fun hexStringToByteArray(s: String): ByteArray {
-        val len = s.length
-        val data = ByteArray(len / 2)
-        var i = 0
-        while (i < len) {
-            data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
-            i += 2
-        }
-        return data
+    // Helper to convert bytes to Hex
+    private fun toHex(bytes: ByteArray): String {
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     suspend fun encryptAndUpload(uri: Uri): String = withContext(Dispatchers.IO) {
@@ -41,19 +30,22 @@ class EncryptedUploadManager(
 
         try {
             android.util.Log.d("EncUploadMgr", "Starting encryption for $uri")
-            // 1. Encrypt
+            
+            // 1. Generate Random Key and IV
+            val keyBytes = ByteArray(32) // 256-bit key
+            SecureRandom().nextBytes(keyBytes)
+            
             val iv = ByteArray(12) // GCM standard IV size
             SecureRandom().nextBytes(iv)
 
-            val secretKey = SecretKeySpec(aesKey, "AES")
+            val secretKey = SecretKeySpec(keyBytes, "AES")
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             val spec = GCMParameterSpec(128, iv)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec)
 
             contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tempFile).use { output ->
-                    // Write IV first
-                    output.write(iv)
+                    // Do NOT write IV to file, it will be passed in the string
                     CipherOutputStream(output, cipher).use { cipherOut ->
                         input.copyTo(cipherOut)
                     }
@@ -64,10 +56,14 @@ class EncryptedUploadManager(
             android.util.Log.d("EncUploadMgr", "Encryption done. Temp file size: ${tempFile.length()}. Uploading...")
             val url = litterboxRepository.uploadFile(tempFile)
             android.util.Log.d("EncUploadMgr", "Upload done. URL: $url")
-            return@withContext url
+            
+            // 3. Return URL|KEY|IV
+            val keyHex = toHex(keyBytes)
+            val ivHex = toHex(iv)
+            return@withContext "$url|$keyHex|$ivHex"
 
         } finally {
-            // 3. Cleanup
+            // 4. Cleanup
             if (tempFile.exists()) {
                 tempFile.delete()
             }

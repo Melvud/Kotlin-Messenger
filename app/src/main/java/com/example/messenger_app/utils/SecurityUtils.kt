@@ -85,4 +85,78 @@ object SecurityUtils {
             "" // Return empty string on failure
         }
     }
+    fun generateSharedSecret(otherPublicKeyBase64: String): javax.crypto.SecretKey? {
+        return try {
+            val keyManager = com.example.messenger_app.utils.KeyManager
+            val privateKey = keyManager.getPrivateKey() ?: return null
+
+            val otherPublicKeyBytes = Base64.decode(otherPublicKeyBase64, Base64.DEFAULT)
+            val keyFactory = java.security.KeyFactory.getInstance(android.security.keystore.KeyProperties.KEY_ALGORITHM_EC)
+            val pubKeySpec = java.security.spec.X509EncodedKeySpec(otherPublicKeyBytes)
+            val otherPublicKey = keyFactory.generatePublic(pubKeySpec)
+
+            val keyAgreement = javax.crypto.KeyAgreement.getInstance("ECDH")
+            keyAgreement.init(privateKey)
+            keyAgreement.doPhase(otherPublicKey, true)
+
+            val sharedSecret = keyAgreement.generateSecret()
+            
+            // Derive AES key using SHA-256
+            val messageDigest = java.security.MessageDigest.getInstance("SHA-256")
+            messageDigest.update(sharedSecret)
+            val digest = messageDigest.digest()
+            
+            SecretKeySpec(digest, "AES")
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    fun encrypt(data: String, secretKey: javax.crypto.SecretKey): String {
+        return try {
+            val iv = ByteArray(IV_LENGTH_BYTE)
+            java.security.SecureRandom().nextBytes(iv)
+
+            val cipher = Cipher.getInstance(ALGORITHM)
+            val gcmSpec = GCMParameterSpec(TAG_LENGTH_BIT, iv)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec)
+
+            val cipherText = cipher.doFinal(data.toByteArray(StandardCharsets.UTF_8))
+
+            val combined = ByteArray(iv.size + cipherText.size)
+            System.arraycopy(iv, 0, combined, 0, iv.size)
+            System.arraycopy(cipherText, 0, combined, iv.size, cipherText.size)
+
+            Base64.encodeToString(combined, Base64.DEFAULT)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            data
+        }
+    }
+
+    fun decrypt(data: String, secretKey: javax.crypto.SecretKey): String {
+        return try {
+            if (data.isEmpty()) return ""
+            val decoded = Base64.decode(data, Base64.DEFAULT)
+            if (decoded.size <= IV_LENGTH_BYTE) return ""
+
+            val iv = ByteArray(IV_LENGTH_BYTE)
+            System.arraycopy(decoded, 0, iv, 0, IV_LENGTH_BYTE)
+
+            val cipherTextSize = decoded.size - IV_LENGTH_BYTE
+            val cipherText = ByteArray(cipherTextSize)
+            System.arraycopy(decoded, IV_LENGTH_BYTE, cipherText, 0, cipherTextSize)
+
+            val cipher = Cipher.getInstance(ALGORITHM)
+            val gcmSpec = GCMParameterSpec(TAG_LENGTH_BIT, iv)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, gcmSpec)
+
+            val plainText = cipher.doFinal(cipherText)
+            String(plainText, StandardCharsets.UTF_8)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ""
+        }
+    }
 }

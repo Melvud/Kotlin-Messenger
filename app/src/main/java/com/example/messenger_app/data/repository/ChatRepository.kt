@@ -27,13 +27,41 @@ class ChatRepository(
     private val database: com.example.messenger_app.data.local.AppDatabase
 ) {
 
-    suspend fun sendMessage(chatId: String, message: Message, recipientId: String) {
+    private val publicKeyCache = mutableMapOf<String, String>()
+
+    suspend fun sendMessage(chatId: String, message: Message, recipientId: String, isGroup: Boolean = false) {
         try {
-            // 1. Encrypt content
-            val encryptedContent = SecurityUtils.encrypt(message.encryptedContent)
+            if (isGroup) {
+                // Fallback for group chats or throw exception
+                // For now, we'll use the legacy static key encryption for groups as a temporary measure
+                // or just throw if strict E2EE is required.
+                // The prompt says: "implement protection only for personal chats, or throw exception".
+                // Let's throw for now to be safe and explicit.
+                throw UnsupportedOperationException("E2EE is not yet supported for group chats.")
+            }
+
+            // 1. Get Public Key
+            var recipientPublicKey = publicKeyCache[recipientId]
+            if (recipientPublicKey == null) {
+                recipientPublicKey = fetchPublicKey(recipientId)
+                if (recipientPublicKey != null) {
+                    publicKeyCache[recipientId] = recipientPublicKey
+                }
+            }
+
+            if (recipientPublicKey == null) {
+                throw IllegalStateException("Recipient public key not found for user $recipientId")
+            }
+
+            // 2. Generate Shared Secret
+            val sharedSecret = SecurityUtils.generateSharedSecret(recipientPublicKey)
+                ?: throw IllegalStateException("Failed to generate shared secret")
+
+            // 3. Encrypt content
+            val encryptedContent = SecurityUtils.encrypt(message.encryptedContent, sharedSecret)
             val encryptedMessage = message.copy(encryptedContent = encryptedContent)
 
-            // 2. Save to Firestore
+            // 4. Save to Firestore
             val messageId = if (message.id.isEmpty()) UUID.randomUUID().toString() else message.id
             val finalMessage = encryptedMessage.copy(id = messageId)
 
@@ -44,52 +72,42 @@ class ChatRepository(
                 .set(finalMessage)
                 .await()
 
-            // 3. Update Chat Metadata
+            // 5. Update Chat Metadata
             val chatUpdate = mapOf(
-                "lastMessage" to "Encrypted Message", // Don't expose content in plain text
+                "lastMessage" to "Encrypted Message",
                 "timestamp" to message.timestamp
             )
             firestore.collection("chats").document(chatId).set(chatUpdate, SetOptions.merge()).await()
 
-            // 4. Fetch Recipient Tokens & Send Push
-            val recipientIds = if (recipientId.isNotEmpty()) {
-                listOf(recipientId)
-            } else {
-                // Fetch participants from chat for group chats
-                val chatSnapshot = firestore.collection("chats").document(chatId).get().await()
-                val participants = chatSnapshot.get("participants") as? List<String> ?: emptyList()
-                participants.filter { it != message.senderId }
-            }
+            // 6. Fetch Recipient Tokens & Send Push
+            // For 1-to-1, recipientId is known.
+            try {
+                val tokensSnapshot = firestore.collection("users")
+                    .document(recipientId)
+                    .collection("devices")
+                    .get()
+                    .await()
 
-            recipientIds.forEach { userId ->
-                try {
-                    val tokensSnapshot = firestore.collection("users")
-                        .document(userId)
-                        .collection("devices")
-                        .get()
-                        .await()
+                val tokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
 
-                    val tokens = tokensSnapshot.documents.mapNotNull { it.getString("token") }
-
-                    tokens.forEach { token ->
-                        pushRepository.sendDirectPush(
-                            targetToken = token,
-                            title = null, // Data-only message
-                            body = null,
-                            data = mapOf(
-                                "type" to "message_new",
-                                "chatId" to chatId,
-                                "senderId" to message.senderId,
-                                "senderName" to message.senderName,
-                                "messageId" to messageId,
-                                "encryptedContent" to encryptedContent,
-                                "messageType" to message.type.name
-                            )
+                tokens.forEach { token ->
+                    pushRepository.sendDirectPush(
+                        targetToken = token,
+                        title = null,
+                        body = null,
+                        data = mapOf(
+                            "type" to "message_new",
+                            "chatId" to chatId,
+                            "senderId" to message.senderId,
+                            "senderName" to message.senderName,
+                            "messageId" to messageId,
+                            "encryptedContent" to encryptedContent,
+                            "messageType" to message.type.name
                         )
-                    }
-                } catch (e: Exception) {
-                    Log.e("ChatRepository", "Error sending push to user $userId", e)
+                    )
                 }
+            } catch (e: Exception) {
+                Log.e("ChatRepository", "Error sending push to user $recipientId", e)
             }
 
         } catch (e: Exception) {
@@ -154,13 +172,68 @@ class ChatRepository(
         try {
             emitAll(
                 database.messageDao().getMessages(chatId).map { localList ->
+                    val chat = database.chatDao().getChatById(chatId)
+                    val currentUserId = com.example.messenger_app.AppGraph.sessionManager.getUid() ?: ""
+                    
                     localList.map { local ->
-                        val decryptedContent = SecurityUtils.decrypt(local.encryptedContent)
+                        var decryptedContent = ""
+                        
+                        if (chat != null && !chat.isGroup) {
+                            // E2EE Logic for 1-to-1
+                            try {
+                                val otherUserId = if (local.senderId == currentUserId) {
+                                    // If I sent it, I encrypted it with OTHER user's public key.
+                                    // To decrypt, I need to regenerate the shared secret using MY private key and OTHER user's public key.
+                                    chat.participants.firstOrNull { it != currentUserId }
+                                } else {
+                                    // If I received it, sender encrypted it with MY public key.
+                                    // To decrypt, I need to regenerate the shared secret using MY private key and SENDER's public key.
+                                    local.senderId
+                                }
+
+                                if (otherUserId != null) {
+                                    // 1. Get Public Key
+                                    var otherPublicKey = publicKeyCache[otherUserId]
+                                    if (otherPublicKey == null) {
+                                        // We can't suspend here easily inside map. 
+                                        // Ideally we should pre-fetch or use a suspending map.
+                                        // But Flow map is not suspending for each item in a way that allows IO easily without slowing down UI.
+                                        // However, we are in a Flow collector which is a suspend context.
+                                        // Wait, `map` takes a transform function.
+                                        // We can't call suspend functions directly in standard `map` unless we use `map` from Flow which supports suspend.
+                                        // Yes, Flow.map takes a suspend transform.
+                                        otherPublicKey = fetchPublicKey(otherUserId)
+                                        if (otherPublicKey != null) {
+                                            publicKeyCache[otherUserId] = otherPublicKey
+                                        }
+                                    }
+
+                                    if (otherPublicKey != null) {
+                                        // 2. Generate Shared Secret
+                                        val sharedSecret = SecurityUtils.generateSharedSecret(otherPublicKey)
+                                        
+                                        if (sharedSecret != null) {
+                                            // 3. Decrypt
+                                            decryptedContent = SecurityUtils.decrypt(local.encryptedContent, sharedSecret)
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e("ChatRepository", "Decryption failed for message ${local.id}", e)
+                            }
+                        }
+
+                        // Fallback to legacy decryption if E2EE failed or it's a group chat
+                        if (decryptedContent.isEmpty()) {
+                             decryptedContent = SecurityUtils.decrypt(local.encryptedContent)
+                        }
+
                         val finalContent = if (decryptedContent.isEmpty() && local.encryptedContent.isNotEmpty()) {
-                            "Ошибка шифрования"
+                            "Не удалось расшифровать сообщение"
                         } else {
                             decryptedContent
                         }
+                        
                         Message(
                             id = local.id,
                             senderId = local.senderId,
@@ -539,5 +612,14 @@ class ChatRepository(
             "timestamp" to message.timestamp
         )
         firestore.collection("chats").document(chatId).set(chatUpdate, SetOptions.merge()).await()
+    }
+    suspend fun fetchPublicKey(userId: String): String? {
+        return try {
+            val snapshot = firestore.collection("users").document(userId).get().await()
+            snapshot.getString("publicKey")
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "Error fetching public key for $userId", e)
+            null
+        }
     }
 }

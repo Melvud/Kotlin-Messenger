@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 object Routes {
     const val AUTH = "auth"
@@ -130,8 +131,22 @@ class MainActivity : ComponentActivity() {
                                     CoroutineScope(Dispatchers.IO).launch {
                                         runCatching {
                                             AppGraph.fcmTokenManager.registerCurrentToken()
+                                            
+                                            // Generate and upload Public Key
+                                            com.example.messenger_app.utils.KeyManager.generateKeyPair()
+                                            val pubKey = com.example.messenger_app.utils.KeyManager.getPublicKey()
+                                            if (pubKey != null) {
+                                                val uid = AppGraph.sessionManager.getUid()
+                                                if (uid != null) {
+                                                    FirebaseFirestore.getInstance().collection("users")
+                                                        .document(uid)
+                                                        .update("publicKey", pubKey)
+                                                        .await()
+                                                    android.util.Log.d("MainActivity", "Public Key uploaded")
+                                                }
+                                            }
                                         }.onFailure { e ->
-                                            android.util.Log.e("MainActivity", "FCM token registration failed", e)
+                                            android.util.Log.e("MainActivity", "FCM/Key registration failed", e)
                                         }
                                     }
                                     navController.navigate(Routes.CHATS_LIST) {
@@ -441,8 +456,22 @@ class MainActivity : ComponentActivity() {
                         CoroutineScope(Dispatchers.IO).launch {
                             runCatching {
                                 AppGraph.fcmTokenManager.registerCurrentToken()
+                                
+                                // Generate and upload Public Key
+                                com.example.messenger_app.utils.KeyManager.generateKeyPair()
+                                val pubKey = com.example.messenger_app.utils.KeyManager.getPublicKey()
+                                if (pubKey != null) {
+                                    val uid = AppGraph.sessionManager.getUid()
+                                    if (uid != null) {
+                                        FirebaseFirestore.getInstance().collection("users")
+                                            .document(uid)
+                                            .update("publicKey", pubKey)
+                                            .await()
+                                        android.util.Log.d("MainActivity", "Public Key uploaded")
+                                    }
+                                }
                             }.onFailure { e ->
-                                android.util.Log.e("MainActivity", "FCM token registration failed", e)
+                                android.util.Log.e("MainActivity", "FCM/Key registration failed", e)
                             }
                         }
                     }
