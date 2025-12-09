@@ -11,7 +11,7 @@ object SecurityUtils {
     // 32 bytes = 256 bits
 
     private val SECRET_KEY_SPEC: SecretKeySpec by lazy {
-        val keyHex = com.example.messenger_app.BuildConfig.AES_KEY
+        val keyHex = com.example.messenger_app.BuildConfig.APP_SIGNATURE_SALT
         val keyBytes = hexStringToByteArray(keyHex)
         SecretKeySpec(keyBytes, "AES")
     }

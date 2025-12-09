@@ -31,7 +31,7 @@ android {
         vectorDrawables.useSupportLibrary = true
 
         // resValue("string", "app_name", appName) // Removed: Injected via strings.xml
-        buildConfigField("String", "AES_KEY", "\"$aesKey\"")
+        buildConfigField("String", "APP_SIGNATURE_SALT", "\"${System.getenv("AES_SECRET") ?: "dev_salt_change_me"}\"")
         buildConfigField("String", "TURN_CONFIG_JSON", "\"$turnConfig\"")
         
         // Optimize APK size
@@ -145,6 +145,7 @@ dependencies {
     implementation("androidx.room:room-runtime:$room_version")
     implementation("androidx.room:room-ktx:$room_version")
     kapt("androidx.room:room-compiler:$room_version")
+    implementation("net.zetetic:android-database-sqlcipher:4.5.3")
 
     // ==================== Media3 (ExoPlayer) ====================
     implementation("androidx.media3:media3-exoplayer:1.4.1")

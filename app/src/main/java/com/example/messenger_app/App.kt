@@ -13,6 +13,7 @@ import com.google.firebase.messaging.messaging
 
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import net.sqlcipher.database.SupportFactory
 
 class App : Application(), ImageLoaderFactory {
     override fun onCreate() {
@@ -103,7 +104,10 @@ object AppGraph {
             app,
             com.example.messenger_app.data.local.AppDatabase::class.java,
             "messenger-db"
-        ).fallbackToDestructiveMigration().build()
+        )
+        .openHelperFactory(SupportFactory(com.example.messenger_app.BuildConfig.APP_SIGNATURE_SALT.toByteArray()))
+        .fallbackToDestructiveMigration()
+        .build()
         
         chatRepo = ChatRepository(db, pushRepo, app, database)
         contactsRepo = ContactsRepository(sessionManager, db)
